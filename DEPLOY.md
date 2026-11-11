@@ -1,5 +1,15 @@
 # Deploying ComicVerse
 
+## Live deployment
+
+- **Frontend:** https://comicverse-flame.vercel.app (Vercel project `comicverse`)
+- **API:** https://comicverse-api.vercel.app (Vercel project `comicverse-api`)
+
+Both projects are linked to `tojix-code/comics` on GitHub — every push to `main`
+redeploys them automatically. Environment variables set on Vercel:
+`VITE_API_URL=https://comicverse-api.vercel.app` on the frontend,
+`ALLOWED_ORIGINS=https://comicverse-flame.vercel.app` on the API.
+
 ComicVerse is two parts that deploy separately:
 
 | Part | What it is | Where it runs |
