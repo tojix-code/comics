@@ -1,0 +1,24 @@
+# One-click backend deploy on Render (free tier works for testing).
+# Render runs `npm ci && npm run build` then `npm start` — the same Express
+# server as local dev, with no 10s function timeout, so the scraped
+# providers (WeebCentral / AsuraScans) get a fair chance.
+services:
+  - type: web
+    name: comicverse-api
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:5173
+        # After deploying the frontend on Vercel, change this to your
+        # frontend URL, e.g. https://comicverse.vercel.app
+      # Optional — only needed when Cloudflare blocks a provider:
+      # - key: PROXY_URL
+      #   sync: false
+      # - key: FLARESOLVERR_URL
+      #   sync: false
