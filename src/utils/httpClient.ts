@@ -215,3 +215,31 @@ export async function fetchJSON<T = unknown>(
     throw new Error(`[httpClient] Invalid JSON from ${url}: ${body.slice(0, 120)}`);
   }
 }
+
+// ─── Plain fetch for public JSON APIs (MangaDex) ─────────────────────────────
+// MangaDex is a public JSON API. Its Cloudflare setup challenges got-scraping's
+// patched TLS fingerprint on serverless IPs (Vercel returns an HTML challenge
+// page instead of JSON), while plain Node fetch with an honest User-Agent
+// works. Verified 2026-11-11: backend MangaDex calls failed on Vercel via
+// got-scraping but plain fetch from a normal network returns 200.
+// ComicK / WeebCentral / AsuraScans still need got-scraping (see above).
+export async function fetchJSONPlain<T = unknown>(
+  url: string,
+  referer?: string
+): Promise<T> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "ComicVerse/1.0 (+https://github.com/tojix-code/comics)",
+      Accept: "application/json",
+      ...(referer ? { Referer: referer } : {}),
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`[httpClient] HTTP ${res.status} from ${url}`);
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`[httpClient] Invalid JSON from ${url}: ${text.slice(0, 120)}`);
+  }
+}

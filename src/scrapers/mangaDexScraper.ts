@@ -1,4 +1,4 @@
-import { fetchJSON } from "../utils/httpClient";
+import { fetchJSONPlain } from "../utils/httpClient";
 
 const BASE       = "https://api.mangadex.org";
 const COVER_BASE = "https://uploads.mangadex.org/covers";
@@ -54,14 +54,18 @@ function mapManga(item: any): MangaDexResult {
 // ── KEY FIX: Build params manually without buildParams() helper ──────────────
 // MangaDex requires:
 //   contentRating[]=safe&contentRating[]=suggestive  (array params)
-//   includeExternalUrl=1                             (plain param, NO brackets)
 // Using URLSearchParams.append() directly avoids any accidental [] wrapping.
+//
+// NOTE (2026-11-11): do NOT add includeExternalUrl=1 here. Empirically it
+// makes the feed return 0 chapters for titles that have 100 readable ones
+// (verified: Eminence in Shadow returns total 0 with it, 100 without it).
+// External chapters are skipped by callers anyway, so omitting the param
+// (which excludes them server-side) is what we want.
 function buildChapterParams(opts: { lang: string; limit: number; offset: number }): string {
   const parts: string[] = [
     `limit=${opts.limit}`,
     `offset=${opts.offset}`,
     `order[chapter]=asc`,
-    `includeExternalUrl=1`,
     ...ALL_RATINGS.map(r => `contentRating[]=${r}`),
     `translatedLanguage[]=${opts.lang}`,
     `includes[]=scanlation_group`,
@@ -96,12 +100,12 @@ export class MangaDexScraper {
       title: query, limit: opts.limit ?? 20, offset: opts.offset ?? 0,
       langs: opts.type ? langMap[opts.type] : [],
     });
-    const data = await fetchJSON<any>(`${BASE}/manga?${qs}`, REFERER);
+    const data = await fetchJSONPlain<any>(`${BASE}/manga?${qs}`, REFERER);
     return (data?.data ?? []).map(mapManga);
   }
 
   async fetchMangaInfo(id: string): Promise<MangaDexResult> {
-    const data = await fetchJSON<any>(`${BASE}/manga/${id}?includes[]=cover_art&includes[]=author`, REFERER);
+    const data = await fetchJSONPlain<any>(`${BASE}/manga/${id}?includes[]=cover_art&includes[]=author`, REFERER);
     return mapManga(data.data);
   }
 
@@ -111,7 +115,7 @@ export class MangaDexScraper {
       limit: opts.limit ?? 96,
       offset: opts.offset ?? 0,
     });
-    const data = await fetchJSON<any>(`${BASE}/manga/${mangaId}/feed?${qs}`, REFERER);
+    const data = await fetchJSONPlain<any>(`${BASE}/manga/${mangaId}/feed?${qs}`, REFERER);
     const chapters: MangaDexChapter[] = (data?.data ?? []).map((c: any) => {
       const group = (c.relationships ?? []).find((r: any) => r.type === "scanlation_group");
       const a = c.attributes ?? {};
@@ -126,7 +130,7 @@ export class MangaDexScraper {
   }
 
   async fetchChapterPages(chapterId: string): Promise<string[]> {
-    const data = await fetchJSON<any>(`${BASE}/at-home/server/${chapterId}`, REFERER);
+    const data = await fetchJSONPlain<any>(`${BASE}/at-home/server/${chapterId}`, REFERER);
     const base = data?.baseUrl ?? "https://uploads.mangadex.org";
     const hash = data?.chapter?.hash ?? "";
     return (data?.chapter?.data ?? []).map((p: string) => `${base}/data/${hash}/${p}`);
@@ -139,7 +143,7 @@ export class MangaDexScraper {
       order: "order[followedCount]=desc",
       langs: opts.type ? langMap[opts.type] : [],
     });
-    const data = await fetchJSON<any>(`${BASE}/manga?${qs}`, REFERER);
+    const data = await fetchJSONPlain<any>(`${BASE}/manga?${qs}`, REFERER);
     return (data?.data ?? []).map(mapManga);
   }
 }
