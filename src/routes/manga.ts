@@ -33,25 +33,46 @@ mangaRouter.get("/sources", (_req, res) => {
   });
 });
 
-// GET /api/manga/search
+// GET /api/manga/search — for mangadex, an empty q is browse mode
+// (list with order/tags/status/year filters), not an error.
 mangaRouter.get("/search", asyncWrapper(async (req: Request, res: Response) => {
   const query = String(req.query.q ?? "").trim();
-  if (!query) return res.status(400).json({ error: "'q' is required." });
   const source = src(req);
   const type   = (req.query.type as any) ?? undefined;
   const limit  = Math.min(Number(req.query.limit ?? 20), 100);
   const page   = Math.max(Number(req.query.page  ?? 1),  1);
-  let results;
+  if (!query && source !== "mangadex") return res.status(400).json({ error: "'q' is required." });
+  const csv = (v: unknown): string[] =>
+    String(v ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  let results, total: number | null = null;
   switch (source) {
     case "comick":      results = await comick.search(query, { type, limit, page }); break;
-    case "mangadex":    results = await mangadex.search(query, { type, limit, offset: (page-1)*limit }); break;
+    case "mangadex": {
+      const r = await mangadex.search(query, {
+        type, limit, offset: (page-1)*limit,
+        tags: csv(req.query.tags), status: csv(req.query.status),
+        year: req.query.year ? Number(req.query.year) : null,
+        contentRating: csv(req.query.contentRating),
+        authorId: String(req.query.authorId ?? "").trim() || null,
+        order: String(req.query.order ?? "").trim() || undefined,
+      });
+      results = r.results; total = r.total; break;
+    }
     case "weebcentral": results = await weebcentral.search(query, page); break;
     case "asura":       results = await asura.search(query); break;
   }
-  res.json({ source, query, results });
+  res.json({ source, query, results, total });
 }));
 
-// GET /api/manga/trending
+// GET /api/manga/trending — mangadex accepts ?order=followedCount|rating|
+// latestUploadedChapter|createdAt so the homepage shelves can each use
+// their own real MangaDex ordering through the backend.
+const MD_ORDERS: Record<string, string> = {
+  followedCount: "order[followedCount]=desc",
+  rating: "order[rating]=desc",
+  latestUploadedChapter: "order[latestUploadedChapter]=desc",
+  createdAt: "order[createdAt]=desc",
+};
 mangaRouter.get("/trending", asyncWrapper(async (req: Request, res: Response) => {
   const source = src(req);
   const type   = (req.query.type as any) ?? undefined;
@@ -60,10 +81,31 @@ mangaRouter.get("/trending", asyncWrapper(async (req: Request, res: Response) =>
   let results;
   switch (source) {
     case "comick":   results = await comick.trending(type, page); break;
-    case "mangadex": results = await mangadex.trending({ type, limit, offset: (page-1)*limit }); break;
+    case "mangadex": results = await mangadex.trending({ type, limit, offset: (page-1)*limit, order: MD_ORDERS[String(req.query.order ?? "followedCount")] ?? MD_ORDERS.followedCount }); break;
     default: return res.status(400).json({ error: `Trending not supported for '${source}'` });
   }
   res.json({ source, results });
+}));
+
+// GET /api/manga/tags — MangaDex genre catalogue, proxied so browsers never
+// need to call api.mangadex.org directly (it 403s datacenter IPs).
+// NOTE: these must stay above the /:id route or Express treats them as ids.
+mangaRouter.get("/tags", asyncWrapper(async (_req: Request, res: Response) => {
+  res.json(await mangadex.fetchTags());
+}));
+
+// GET /api/manga/statistics?ids=<uuid>,<uuid> — real bayesian ratings.
+mangaRouter.get("/statistics", asyncWrapper(async (req: Request, res: Response) => {
+  const ids = String(req.query.ids ?? "").split(",").map(s => s.trim()).filter(Boolean).slice(0, 100);
+  if (!ids.length) return res.status(400).json({ error: "'ids' is required." });
+  res.json(await mangadex.fetchStatistics(ids));
+}));
+
+// GET /api/manga/authors?name=... — creator lookup for the Browse filter.
+mangaRouter.get("/authors", asyncWrapper(async (req: Request, res: Response) => {
+  const name = String(req.query.name ?? "").trim();
+  if (!name) return res.status(400).json({ error: "'name' is required." });
+  res.json(await mangadex.fetchAuthors(name));
 }));
 
 // GET /api/manga/:id

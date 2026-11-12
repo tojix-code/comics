@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import express, { Request, Response, NextFunction } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -8,6 +10,8 @@ import { proxyRouter } from "./proxy/imageProxy";
 // The Express app, without listen(). server.ts starts it for local /
 // long-running hosting; api/index.ts re-exports it for Vercel serverless.
 const app = express();
+
+app.disable("x-powered-by");
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -34,8 +38,13 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
-app.use(express.json());
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false }));
+app.use(express.json({ limit: "1mb" }));
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX ?? 300),
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
 
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) => {
@@ -49,8 +58,12 @@ app.use("/api/proxy", proxyRouter);
 
 // ── 404 & error ───────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Route not found" }));
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-  res.status(err?.status ?? 500).json({ error: err?.message ?? "Server error" });
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const statusCode = Number((err as { statusCode?: number; status?: number })?.statusCode ?? (err as { status?: number })?.status ?? 500);
+  const safeStatus = statusCode >= 400 && statusCode <= 599 ? statusCode : 500;
+  const message = err instanceof Error ? err.message : "Unexpected server error";
+  console.error(`[API error] ${message}`);
+  res.status(safeStatus).json({ error: safeStatus === 500 ? "Internal server error" : message });
 });
 
 export default app;

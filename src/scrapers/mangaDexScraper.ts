@@ -76,32 +76,58 @@ function buildChapterParams(opts: { lang: string; limit: number; offset: number 
 function buildSearchParams(opts: {
   title?: string; limit: number; offset: number;
   langs?: string[]; order?: string;
+  tags?: string[]; status?: string[]; year?: number | null;
+  contentRating?: string[]; authorId?: string | null;
 }): string {
   const parts: string[] = [
     opts.title ? `title=${encodeURIComponent(opts.title)}` : "",
     `limit=${opts.limit}`,
     `offset=${opts.offset}`,
     opts.order ?? "order[relevance]=desc",
-    ...ALL_RATINGS.map(r => `contentRating[]=${r}`),
+    ...(opts.contentRating ?? ALL_RATINGS).map(r => `contentRating[]=${r}`),
     `includes[]=cover_art`,
     `includes[]=author`,
     ...(opts.langs ?? []).map(l => `originalLanguage[]=${l}`),
+    ...(opts.tags ?? []).map(t => `includedTags[]=${encodeURIComponent(t)}`),
+    ...((opts.tags ?? []).length > 1 ? ["includedTagsMode=AND"] : []),
+    ...(opts.status ?? []).map(s => `status[]=${encodeURIComponent(s)}`),
+    opts.year ? `year=${opts.year}` : "",
+    opts.authorId ? `authors[]=${encodeURIComponent(opts.authorId)}` : "",
   ].filter(Boolean);
   return parts.join("&");
 }
 
 export class MangaDexScraper {
 
-  async search(query: string, opts: { type?: ContentType; limit?: number; offset?: number } = {}): Promise<MangaDexResult[]> {
+  async search(query: string, opts: { type?: ContentType; limit?: number; offset?: number; tags?: string[]; status?: string[]; year?: number | null; contentRating?: string[]; authorId?: string | null; order?: string } = {}): Promise<{ results: MangaDexResult[]; total: number }> {
     const langMap: Record<string, string[]> = {
       manga: ["ja","ja-ro"], manhwa: ["ko","ko-ro"], manhua: ["zh","zh-hk"],
     };
     const qs = buildSearchParams({
       title: query, limit: opts.limit ?? 20, offset: opts.offset ?? 0,
       langs: opts.type ? langMap[opts.type] : [],
+      tags: opts.tags, status: opts.status, year: opts.year,
+      contentRating: opts.contentRating, authorId: opts.authorId,
+      order: opts.order,
     });
     const data = await fetchJSONPlain<any>(`${BASE}/manga?${qs}`, REFERER);
-    return (data?.data ?? []).map(mapManga);
+    return { results: (data?.data ?? []).map(mapManga), total: data?.total ?? 0 };
+  }
+
+  /** Tag (genre) catalogue, proxied so browsers never need to call MangaDex directly. */
+  async fetchTags(): Promise<any> {
+    return fetchJSONPlain<any>(`${BASE}/manga/tag`, REFERER);
+  }
+
+  /** Real bayesian ratings + follows for a list of ids, proxied. */
+  async fetchStatistics(ids: string[]): Promise<any> {
+    const q = ids.map((id) => `manga[]=${encodeURIComponent(id)}`).join("&");
+    return fetchJSONPlain<any>(`${BASE}/statistics/manga?${q}`, REFERER);
+  }
+
+  /** Author lookup by name, proxied (used for the creator filter). */
+  async fetchAuthors(name: string): Promise<any> {
+    return fetchJSONPlain<any>(`${BASE}/author?name=${encodeURIComponent(name)}&limit=5`, REFERER);
   }
 
   async fetchMangaInfo(id: string): Promise<MangaDexResult> {
@@ -136,11 +162,11 @@ export class MangaDexScraper {
     return (data?.chapter?.data ?? []).map((p: string) => `${base}/data/${hash}/${p}`);
   }
 
-  async trending(opts: { type?: ContentType; limit?: number; offset?: number } = {}): Promise<MangaDexResult[]> {
+  async trending(opts: { type?: ContentType; limit?: number; offset?: number; order?: string } = {}): Promise<MangaDexResult[]> {
     const langMap: Record<string, string[]> = { manga: ["ja"], manhwa: ["ko"], manhua: ["zh"] };
     const qs = buildSearchParams({
       limit: opts.limit ?? 20, offset: opts.offset ?? 0,
-      order: "order[followedCount]=desc",
+      order: opts.order ?? "order[followedCount]=desc",
       langs: opts.type ? langMap[opts.type] : [],
     });
     const data = await fetchJSONPlain<any>(`${BASE}/manga?${qs}`, REFERER);

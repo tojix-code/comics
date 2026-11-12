@@ -316,14 +316,21 @@ async function mdList(opts) {
   };
 }
 
-/** Real MangaDex statistics: bayesian rating + follows. Never invented. */
+/** Real MangaDex statistics: bayesian rating + follows. Never invented.
+ *  Goes through the backend first (browsers on datacenter IPs get 403
+ *  calling api.mangadex.org directly); direct call is only a fallback. */
 let statsCache = new Map();
 export async function getStatistics(ids) {
   const fresh = ids.filter((id) => !statsCache.has(id));
   if (fresh.length) {
     try {
       const q = fresh.map((id) => `manga[]=${encodeURIComponent(id)}`).join('&');
-      const data = await fetchJson(`${MD_API}/statistics/manga?${q}`, { ms: 15000 });
+      let data;
+      try {
+        data = await backendGet(`/api/manga/statistics?ids=${fresh.map((id) => encodeURIComponent(id)).join(',')}`, { ms: 15000 });
+      } catch {
+        data = await fetchJson(`${MD_API}/statistics/manga?${q}`, { ms: 15000 });
+      }
       Object.entries(data?.statistics ?? {}).forEach(([id, s]) => {
         statsCache.set(id, {
           bayesian: s?.rating?.bayesian ?? null,
@@ -359,7 +366,12 @@ export async function withRatings(seriesList) {
 let tagsCache = null;
 export async function getTags() {
   if (tagsCache) return tagsCache;
-  const data = await fetchJson(`${MD_API}/manga/tag`, { ms: 15000 });
+  let data;
+  try {
+    data = await backendGet('/api/manga/tags', { ms: 15000 });
+  } catch {
+    data = await fetchJson(`${MD_API}/manga/tag`, { ms: 15000 });
+  }
   tagsCache = (data?.data ?? []).map((t) => ({
     id: t.id, name: t.attributes?.name?.en ?? '', group: t.attributes?.group ?? '',
   })).filter((t) => t.name);
@@ -368,7 +380,12 @@ export async function getTags() {
 
 export async function resolveAuthorId(name) {
   if (!name?.trim()) return null;
-  const data = await fetchJson(`${MD_API}/author?name=${encodeURIComponent(name.trim())}&limit=5`, { ms: 15000 });
+  let data;
+  try {
+    data = await backendGet(`/api/manga/authors?name=${encodeURIComponent(name.trim())}`, { ms: 15000 });
+  } catch {
+    data = await fetchJson(`${MD_API}/author?name=${encodeURIComponent(name.trim())}&limit=5`, { ms: 15000 });
+  }
   const list = data?.data ?? [];
   const exact = list.find((a) => (a.attributes?.name || '').toLowerCase() === name.trim().toLowerCase());
   return (exact || list[0])?.id || null;
@@ -410,14 +427,22 @@ export async function searchSeries({ q, source = 'mangadex', type = null, page =
   }
 }
 
-/** Homepage lists. MangaDex lists come from the public API (all four orderings
- *  are real MangaDex orderings). ComicK trending goes through the backend.
- *  WeebCentral / AsuraScans have no list endpoint — they are search-only. */
+/** Homepage lists. MangaDex lists go through the backend first (the backend
+ *  proxies MangaDex with plain fetch) — browsers calling api.mangadex.org
+ *  directly get a 403 on datacenter IPs, so direct is only a fallback.
+ *  ComicK trending goes through the backend. WeebCentral / AsuraScans have
+ *  no list endpoint — they are search-only. */
 const LIST_ORDERS = {
   trending: 'order[followedCount]=desc',
   popular: 'order[rating]=desc',
   'recent-updates': 'order[latestUploadedChapter]=desc',
   'recently-added': 'order[createdAt]=desc',
+};
+const LIST_BACKEND_ORDERS = {
+  trending: 'followedCount',
+  popular: 'rating',
+  'recent-updates': 'latestUploadedChapter',
+  'recently-added': 'createdAt',
 };
 export async function listSeries(kind, { source = 'mangadex', type = null, page = 1, limit = 18 } = {}) {
   if (!LIST_ORDERS[kind]) throw new ApiError(`Unknown list: ${kind}`, { code: 'validation' });
@@ -435,18 +460,42 @@ export async function listSeries(kind, { source = 'mangadex', type = null, page 
   if (source === 'weebcentral' || source === 'asura') {
     throw new ApiError(`${sourceById(source).name} has no browse list — search for a title instead, or add titles from it in Admin → Add title.`, { source, code: 'unsupported' });
   }
-  const md = await mdList({ type, page, limit, order: LIST_ORDERS[kind] });
-  return { results: md.results, total: md.total, source: 'mangadex', page };
+  try {
+    const params = new URLSearchParams({ source: 'mangadex', order: LIST_BACKEND_ORDERS[kind], page: String(page), limit: String(limit) });
+    if (type) params.set('type', type);
+    const data = await backendGet(`/api/manga/trending?${params}`);
+    const results = (data?.results ?? []).map((r) => normaliseSeries(r, 'mangadex'));
+    return { results, total: results.length, source: 'mangadex', page };
+  } catch {
+    // Direct public API as a fallback (works from most home connections).
+    const md = await mdList({ type, page, limit, order: LIST_ORDERS[kind] });
+    return { results: md.results, total: md.total, source: 'mangadex', page, fallback: true };
+  }
 }
 
-/** Full browse/search against MangaDex with server-side filters. */
+/** Full browse/search against MangaDex with server-side filters.
+ *  Goes through the backend first; direct public API is only a fallback. */
 export async function browseMangaDex({ q = '', type = null, page = 1, limit = 20, tags = [], status = [], year = null, contentRating = MD_RATINGS, authorName = '', order = 'order[followedCount]=desc' } = {}) {
   let authorId = null;
   if (authorName?.trim()) {
     try { authorId = await resolveAuthorId(authorName); } catch { authorId = null; }
     if (!authorId) return { results: [], total: 0, page, authorNotFound: true };
   }
-  return mdList({ title: q || undefined, type, page, limit, order, tags, status, year, contentRating, authorId });
+  try {
+    const params = new URLSearchParams({ source: 'mangadex', page: String(page), limit: String(limit), order });
+    if (q) params.set('q', q);
+    if (type) params.set('type', type);
+    if (tags.length) params.set('tags', tags.join(','));
+    if (status.length) params.set('status', status.join(','));
+    if (year) params.set('year', String(year));
+    if (contentRating?.length) params.set('contentRating', contentRating.join(','));
+    if (authorId) params.set('authorId', authorId);
+    const data = await backendGet(`/api/manga/search?${params}`);
+    const results = (data?.results ?? []).map((r) => normaliseSeries(r, 'mangadex'));
+    return { results, total: data?.total ?? results.length, page };
+  } catch {
+    return mdList({ title: q || undefined, type, page, limit, order, tags, status, year, contentRating, authorId });
+  }
 }
 
 export async function getSeries(source, id) {

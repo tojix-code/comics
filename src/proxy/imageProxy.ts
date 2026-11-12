@@ -27,8 +27,11 @@ proxyRouter.get("/image", asyncWrapper(async (req: Request, res: Response) => {
   try { parsed = new URL(rawUrl); }
   catch { return res.status(400).json({ error: "Invalid URL." }); }
 
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return res.status(400).json({ error: "Only http/https URLs allowed." });
+  if (parsed.protocol !== "https:") {
+    return res.status(400).json({ error: "Only HTTPS image URLs are allowed." });
+  }
+  if (parsed.username || parsed.password || parsed.port) {
+    return res.status(400).json({ error: "Image URL credentials and custom ports are not allowed." });
   }
 
   const domainAllowed = ALLOWED_IMAGE_DOMAINS.some(
@@ -50,13 +53,19 @@ proxyRouter.get("/image", asyncWrapper(async (req: Request, res: Response) => {
     headers: { Referer: referer, Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8" },
     retry: { limit: 2 },
     timeout: { request: 15_000 },
+    maxResponseSize: 15 * 1024 * 1024,
   });
 
   if (response.statusCode !== 200) {
     return res.status(502).json({ error: `Upstream returned ${response.statusCode}` });
   }
 
-  res.setHeader("Content-Type", response.headers["content-type"] ?? "image/jpeg");
+  const contentType = String(response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+  if (!contentType.startsWith("image/")) {
+    return res.status(502).json({ error: "Upstream did not return an image." });
+  }
+
+  res.setHeader("Content-Type", contentType);
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "public, max-age=604800, immutable");
   res.end(response.body);
