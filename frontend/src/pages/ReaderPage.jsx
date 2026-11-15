@@ -62,7 +62,10 @@ export default function ReaderPage() {
   useEffect(() => {
     let cancelled = false;
     getSeries(source, seriesId).then((s) => { if (!cancelled) setSeries(s); }).catch(() => {});
-    getChapters(source, seriesId, {})
+    // Load the full chapter list (limit 500) so Prev/Next chapter works even
+    // for long series like Solo Leveling (201 chapters) — the default 96
+    // would cut the list off and hide Next chapter past Ch. 96.
+    getChapters(source, seriesId, { limit: 500 })
       .then((res) => { if (!cancelled) setChapters(res.chapters); })
       .catch(() => {});
     return () => { cancelled = true; };

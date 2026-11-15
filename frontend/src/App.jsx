@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import { useCurrentUser } from './lib/useAuth';
 import { isAdmin, logout } from './lib/store';
@@ -76,9 +76,25 @@ function RequireAdmin({ children }) {
 }
 
 export default function App() {
+  // Telegram Mini App mode: the bot opens the reader with ?mini=1 (or the
+  // page is already inside Telegram's WebView). Hide the site navbar/footer
+  // so the reader fills the screen, expand to full height, and use Telegram's
+  // theme colours. Outside Telegram this is all a no-op.
+  const params = new URLSearchParams(window.location.search);
+  const tg = window.Telegram?.WebApp;
+  const mini = params.get('mini') === '1' || Boolean(tg?.initData);
+  useEffect(() => {
+    if (!tg) return;
+    try {
+      tg.ready();
+      tg.expand();
+      tg.setHeaderColor('#0b0f14');
+      tg.setBackgroundColor('#0b0f14');
+    } catch { /* not in Telegram — ignore */ }
+  }, [tg]);
   return (
     <BrowserRouter>
-      <Navbar />
+      {!mini && <Navbar />}
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/browse" element={<BrowsePage />} />
@@ -89,6 +105,7 @@ export default function App() {
         <Route path="/admin" element={<RequireAdmin><AdminPage /></RequireAdmin>} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
+      {!mini && (
       <footer className="footer">
         <p>
           ComicVerse reads from MangaDex, ComicK, WeebCentral and AsuraScans through the
@@ -97,6 +114,7 @@ export default function App() {
         </p>
         <p className="footer-dim">Accounts, bookmarks and progress are stored locally in your browser in v1.</p>
       </footer>
+      )}
     </BrowserRouter>
   );
 }

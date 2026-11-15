@@ -72,3 +72,16 @@ Tested live 2026-11-15:
 - `api.js` — ComicVerse API client with Asura-first / MangaDex fallback, including direct MangaDex feed + at-home fallbacks
 - `test-api.js` — live API test, no token needed
 - `.env.example` — copy to `.env` with your token
+
+## Reading — Mini App (2026-11-15)
+
+Tapping a chapter opens the ComicVerse reader as a Telegram Mini App
+(`📖 Open Reader` button, web_app URL `https://comicverse-flame.vercel.app/read/<source>/<seriesId>/<chapterId>?mini=1`).
+The reader runs in Telegram's WebView, so page images load directly from the
+CDN in the browser — the bot no longer has to download every page itself
+(that download was failing with `fetch failed` for Asura CDN images when the
+bot runs on Windows). The reader has a chapter dropdown and Prev / Next
+chapter buttons at the bottom.
+
+`📥 Send pages in chat instead` still tries the old photo flow (10 pages at
+a time as a media group, `.webp` pages fall back to documents).

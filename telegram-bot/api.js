@@ -28,7 +28,15 @@ async function fetchJson(url, ms = 20000) {
 }
 
 async function tryFetchBuffer(url, headers, ms) {
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(ms) });
+  let res;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(ms) });
+  } catch (e) {
+    // Node's "fetch failed" hides the real cause — surface it (DNS, TLS,
+    // connection reset…) so the log actually says what went wrong.
+    const cause = e?.cause ? ` (${e.cause.code || e.cause.message || e.cause})` : '';
+    throw new Error(`fetch failed${cause} for ${url}`);
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching image`);
   const buf = Buffer.from(await res.arrayBuffer());
   const type = res.headers.get('content-type') || '';
@@ -42,12 +50,18 @@ async function tryFetchBuffer(url, headers, ms) {
 async function fetchBuffer(url, ms = 25000) {
   // Try 1: plain honest fetch — this is what fixed the MangaDex JSON calls
   // on Vercel (got-scraping / browser UA gets challenged). Try 2: browser UA.
+  // Try 3: Asura referer — the Asura CDN sometimes wants a same-site referer.
   const attempts = [
     { 'User-Agent': 'ComicVerse-Telegram-Bot/1.0', Accept: 'image/*,*/*;q=0.8' },
     {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
       Accept: 'image/*,*/*;q=0.8',
       Referer: 'https://comicverse-flame.vercel.app/',
+    },
+    {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+      Accept: 'image/*,*/*;q=0.8',
+      Referer: 'https://asurascans.com/',
     },
   ];
   let lastErr = null;

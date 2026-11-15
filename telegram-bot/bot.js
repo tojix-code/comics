@@ -17,6 +17,16 @@ if (!TOKEN) {
 const bot = new Telegraf(TOKEN);
 const PAGE_BATCH = 10; // Telegram allows max 10 photos per media group
 const CHAPTERS_PER_PAGE = 10;
+// Mini App reader — the ComicVerse web reader, opened inside Telegram.
+// It already has strip/paged reading, a chapter dropdown and Prev/Next
+// chapter buttons. Reading happens in the phone's browser (Telegram WebView),
+// so page images load directly from the CDN — the bot running on a laptop
+// no longer has to download every page itself (that download is what was
+// failing with "fetch failed" for Asura CDN images on Windows).
+const MINI_READER_BASE = (process.env.MINI_READER_URL || 'https://comicverse-flame.vercel.app/read').replace(/\/$/, '');
+function readerUrl(source, seriesId, chapterId) {
+  return `${MINI_READER_BASE}/${encodeURIComponent(source)}/${encodeURIComponent(seriesId)}/${encodeURIComponent(chapterId)}?mini=1`;
+}
 
 // chatId -> { results:[], series, chapters:[], chapterPage:0, reading:{pages,pos,chapter,series} }
 const sessions = new Map();
@@ -189,6 +199,31 @@ async function sendPageBatch(ctx) {
 }
 
 async function startReading(ctx, chapterIdx) {
+  // Mini App first: tapping a chapter opens the ComicVerse reader inside
+  // Telegram, with the chapter's pages and Prev/Next chapter buttons.
+  // The old in-chat photo flow is still available via "Send pages in chat"
+  // (r2:), but it downloads every page on the machine running the bot —
+  // and on Gagan's Windows laptop that download fails for Asura CDN images
+  // ("fetch failed"), so the Mini App is the reliable way to read.
+  const s = session(ctx);
+  const chapter = s.chapters?.[chapterIdx];
+  if (!chapter || !s.series) { await ctx.answerCbQuery('Chapter expired — open the series again.'); return; }
+  await ctx.answerCbQuery();
+  const url = readerUrl(s.series.source, s.series.id, chapter.id);
+  await ctx.reply(
+    `<b>${esc(s.series.title)}</b> — Chapter ${esc(chapter.number)}${chapter.title ? ` — ${esc(chapter.title)}` : ''}\n${sourceLabel(s.series.source)} • tap below to read.`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.webApp('📖 Open Reader', url)],
+        [Markup.button.callback('📥 Send pages in chat instead', `r2:${chapterIdx}`)],
+        [Markup.button.callback('📚 Chapters', 'backch')],
+      ]),
+    }
+  );
+}
+
+async function startReadingInChat(ctx, chapterIdx) {
   const s = session(ctx);
   const chapter = s.chapters?.[chapterIdx];
   if (!chapter || !s.series) { await ctx.answerCbQuery('Chapter expired — open the series again.'); return; }
@@ -208,14 +243,14 @@ async function startReading(ctx, chapterIdx) {
 // ─── Commands ────────────────────────────────────────────────────────────────
 bot.start((ctx) => ctx.reply(
   `👋 Hi, I'm the ComicVerse bot.\n\n` +
-  `Search AsuraScans first, MangaDex as fallback, and read chapters right here in Telegram.\n\n` +
+  `Search AsuraScans first, MangaDex as fallback, and read chapters in the Mini App reader right inside Telegram.\n\n` +
   `• /search <title> — e.g. /search solo leveling\n` +
   `• Or just type a title — plain text also searches\n` +
-  `• Tap a result → tap a chapter → pages arrive as photos, 10 at a time\n\n` +
+  `• Tap a result → tap a chapter → 📖 Open Reader opens the Mini App, with Prev / Next chapter buttons at the bottom\n\n` +
   `Note: AsuraScans works now (fixed 2026-11-15) — searches try Asura first, MangaDex as fallback. MangaDex reading works — tested with Berserk Ch. 0.01, 94 pages.`
 ));
 bot.help((ctx) => ctx.reply(
-  `Commands:\n/search <title> — search AsuraScans, fallback MangaDex\n/start — about this bot\n\nJust typing a title also searches. Tap a result, then a chapter, then Next to keep reading.`
+  `Commands:\n/search <title> — search AsuraScans, fallback MangaDex\n/start — about this bot\n\nJust typing a title also searches. Tap a result, then a chapter, then 📖 Open Reader — the Mini App has Prev / Next chapter buttons.`
 ));
 bot.command('search', (ctx) => doSearch(ctx, ctx.message.text.replace(/^\/search\s*/i, '')));
 
@@ -237,6 +272,7 @@ bot.action(/^cp:(\d+)$/, async (ctx) => {
   });
 });
 bot.action(/^r:(\d+)$/, (ctx) => startReading(ctx, Number(ctx.match[1])));
+bot.action(/^r2:(\d+)$/, (ctx) => startReadingInChat(ctx, Number(ctx.match[1])));
 bot.action('n:', async (ctx) => { await ctx.answerCbQuery(); await sendPageBatch(ctx); });
 bot.action('backch', async (ctx) => {
   const s = session(ctx);
