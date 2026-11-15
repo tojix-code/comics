@@ -211,7 +211,10 @@ export default function ReaderPage() {
   function goToChapter(ch) {
     if (ch) navigate(`/read/${source}/${encodeURIComponent(seriesId)}/${encodeURIComponent(ch.id)}`);
   }
-  const pct = pages.length ? progressPercent(Math.max(pageIndex, maxSeen), pages.length) : 0;
+  // Paged mode tracks the current page; strip mode tracks the furthest page
+  // seen. Using maxSeen in paged mode would stick the bar at 100% after
+  // switching over from strip (where every page was already observed).
+  const pct = pages.length ? progressPercent(mode === 'paged' ? pageIndex : Math.max(pageIndex, maxSeen), pages.length) : 0;
   const filter = pageFilter(settings);
   const eager = settings.preload === 'all';
   const progressClass =
