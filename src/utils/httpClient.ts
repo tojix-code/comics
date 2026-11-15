@@ -64,11 +64,18 @@ const PROXY_URL        = process.env.PROXY_URL;         // residential proxy
 const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL;  // FlareSolverr instance
 
 // ─── Detect Cloudflare challenge pages ───────────────────────────────────────
+// NOTE (2026-11-15): "challenge-platform" alone is NOT a challenge — Cloudflare
+// injects a hidden jsd/challenge-platform script into EVERY real AsuraScans
+// page (and many other CF sites). Treating it as blocked made Asura fail
+// forever even when the server returned 200 with real HTML. A real challenge
+// page has <title>Just a moment</title> (or "Attention Required") and a
+// challenge form; check for that, not the injected script.
 function isCFBlocked(statusCode: number, body: string): boolean {
   if (statusCode === 403) return true;
   if (statusCode === 503 && body.includes("cloudflare")) return true;
   // CF Turnstile/IUAM challenge page detection
-  if (body.includes("challenge-platform") || body.includes("cf-challenge")) return true;
+  if (body.includes("<title>Just a moment") || body.includes("<title>Attention Required")) return true;
+  if (body.includes("cf-challenge") && body.includes("Just a moment")) return true;
   if (body.includes("cf_clearance") && body.includes("<title>Just a moment")) return true;
   return false;
 }
@@ -216,13 +223,45 @@ export async function fetchJSON<T = unknown>(
   }
 }
 
+// ─── Plain fetch for HTML pages that allow it (AsuraScans, new site) ─────────
+// AsuraScans moved from asuracomic.net (old site, Cloudflare Turnstile) to
+// asurascans.com (Astro site, 2026-11-15). Plain Node fetch with a browser
+// User-Agent returns 200 with real HTML from a normal network — no challenge
+// page — while got-scraping was challenged on Vercel. Same lesson as the
+// MangaDex JSON fix: try plain first, fall back to got-scraping only if the
+// page is a Cloudflare challenge or non-200.
+export async function fetchHTMLPlain(
+  url: string,
+  referer = "https://asurascans.com/"
+): Promise<string> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      Referer: referer,
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`[httpClient] HTTP ${res.status} from ${url}`);
+  const text = await res.text();
+  // Real challenge pages have <title>Just a moment</title>. Do NOT treat
+  // "challenge-platform" as a block — Cloudflare injects that script into
+  // every real AsuraScans page (see isCFBlocked note above).
+  if (
+    text.includes("<title>Just a moment") ||
+    text.includes("<title>Attention Required")
+  ) {
+    throw new Error(`[httpClient] Cloudflare challenge from ${url}`);
+  }
+  return text;
+}
 // ─── Plain fetch for public JSON APIs (MangaDex) ─────────────────────────────
 // MangaDex is a public JSON API. Its Cloudflare setup challenges got-scraping's
 // patched TLS fingerprint on serverless IPs (Vercel returns an HTML challenge
 // page instead of JSON), while plain Node fetch with an honest User-Agent
 // works. Verified 2026-11-11: backend MangaDex calls failed on Vercel via
 // got-scraping but plain fetch from a normal network returns 200.
-// ComicK / WeebCentral / AsuraScans still need got-scraping (see above).
 export async function fetchJSONPlain<T = unknown>(
   url: string,
   referer?: string

@@ -5,9 +5,10 @@
 //   GET /api/manga/:id/chapters?source=asura
 //   GET /api/manga/:id/chapters/:chapterId/pages?chapterSource=asura
 //
-// Asura is search-only and is Cloudflare-blocked on Vercel IPs right now
-// (live test 2026-11-15: search returned {"error":"Internal server error"}).
-// So every call tries Asura first, then falls back to MangaDex through the
+// Asura was Cloudflare-blocked on Vercel IPs until 2026-11-15, when the
+// scraper was rewritten for the new asurascans.com site (plain fetch, fixed
+// challenge detection — see backend src/scrapers/asuraScraper.ts).
+// Every call still tries Asura first, then falls back to MangaDex through the
 // backend, then to the public MangaDex API directly. The bot always tells
 // the user which source actually answered, and never invents data.
 
@@ -81,7 +82,7 @@ function normSeries(raw, source) {
     description: raw.description || '',
     authors: raw.authors || [],
     year: raw.year ?? null,
-    lastChapter: raw.lastChapter ?? null,
+    lastChapter: raw.lastChapter ?? raw.latestChapter ?? null,
     ratingValue: rating,
     totalChapters: raw.totalChapters ?? null,
   };
@@ -175,13 +176,13 @@ async function searchSeries(query) {
   // 2. MangaDex through your backend (plain-fetch path, works on Vercel)
   try {
     const md = await backendSearch('mangadex', query, 5);
-    if (md.length) return { source: 'mangadex', results: md, fallback: true, fallbackReason: 'Asura is blocked right now (Cloudflare), so these are MangaDex results.' };
+    if (md.length) return { source: 'mangadex', results: md, fallback: true, fallbackReason: 'Asura did not answer, so these are MangaDex results.' };
   } catch (e) {
     console.warn('[bot] Backend MangaDex search failed:', e.message);
   }
   // 3. Public MangaDex API directly
   const direct = await mdSearchDirect(query, 5);
-  return { source: 'mangadex', results: direct, fallback: true, fallbackReason: 'Asura is blocked right now (Cloudflare), so these are MangaDex results.' };
+  return { source: 'mangadex', results: direct, fallback: true, fallbackReason: 'Asura did not answer, so these are MangaDex results.' };
 }
 
 async function getSeries(source, id) {
@@ -252,7 +253,7 @@ async function getPages(source, seriesId, chapter) {
       return { pages, source: 'mangadex', fallback: true };
     }
   }
-  throw new Error('This chapter has no readable pages. Its ComicK version returns no images, and MangaDex has no free (non-licensed) version of this chapter — Asura would be the readable source here, but it is Cloudflare-blocked right now.');
+  throw new Error('This chapter has no readable pages. Its ComicK version returns no images, and MangaDex has no free (non-licensed) version of this chapter.');
 }
 
 module.exports = { API_BASE, searchSeries, getSeries, getChapters, getPages, fetchBuffer };

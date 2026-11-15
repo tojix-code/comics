@@ -48,13 +48,14 @@ function seriesCaption(s, extra = '') {
 
 async function sendCover(ctx, s, caption, buttons) {
   // 1. Download the cover ourselves and upload it (most reliable for pages).
+  let buf = null;
   try {
     if (s.cover) {
-      const buf = await api.fetchBuffer(s.cover);
+      buf = await api.fetchBuffer(s.cover);
       await ctx.replyWithPhoto({ source: buf }, { caption, parse_mode: 'HTML', ...buttons });
       return;
     }
-  } catch (e) { console.warn('[bot] cover download failed, trying Telegram direct URL:', e.message); }
+  } catch (e) { console.warn('[bot] cover photo failed, trying direct URL:', e.message); }
   // 2. Let Telegram's own servers fetch the URL — sometimes they succeed
   // where our download gets a MangaDex bot-check page (uploads host 403/302).
   try {
@@ -62,7 +63,15 @@ async function sendCover(ctx, s, caption, buttons) {
       await ctx.replyWithPhoto(s.cover, { caption, parse_mode: 'HTML', ...buttons });
       return;
     }
-  } catch (e) { console.warn('[bot] cover direct URL failed, sending text instead:', e.message); }
+  } catch (e) { console.warn('[bot] cover direct URL failed, trying document:', e.message); }
+  // 2b. Asura covers are .webp — if Telegram rejects them as a photo,
+  // send as a document (still shows inline in the chat).
+  try {
+    if (buf) {
+      await ctx.replyWithDocument({ source: buf, filename: 'cover.webp' }, { caption, parse_mode: 'HTML', ...buttons });
+      return;
+    }
+  } catch (e) { console.warn('[bot] cover document failed, sending text instead:', e.message); }
   // 3. Text only — the series info still works, just without a cover photo.
   await ctx.reply(caption, { parse_mode: 'HTML', ...buttons });
 }
@@ -88,7 +97,7 @@ async function doSearch(ctx, query) {
       { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
   } catch (e) {
     await ctx.telegram.editMessageText(ctx.chat.id, wait.message_id, undefined,
-      `Search failed: ${esc(e.message)}\n\nAsura is Cloudflare-blocked on the server right now and MangaDex did not answer either. Try again in a bit.`,
+      `Search failed: ${esc(e.message)}\n\nAsura and MangaDex both failed to answer. Try again in a bit.`,
       { parse_mode: 'HTML' });
   }
 }
@@ -144,20 +153,33 @@ async function sendPageBatch(ctx) {
   }
   // Download first, then send as one album — Telegram can't reliably fetch
   // MangaDex / Asura CDN URLs directly (hotlink protection).
-  const photos = [];
+  const buffers = [];
   for (const url of batch) {
     try {
       const buf = await api.fetchBuffer(url);
-      photos.push({ type: 'photo', media: { source: buf } });
+      buffers.push({ url, buf });
     } catch (e) { console.warn('[bot] page failed:', url, e.message); }
   }
-  if (!photos.length) {
+  if (!buffers.length) {
     await ctx.reply('Those pages failed to load (the image host blocked the download). Try another chapter — MangaDex chapters usually work.');
     return;
   }
-  const from = r.pos + 1, to = r.pos + photos.length;
-  await ctx.replyWithMediaGroup(photos);
-  r.pos += photos.length;
+  const from = r.pos + 1, to = r.pos + buffers.length;
+  const photos = buffers.map(({ buf }) => ({ type: 'photo', media: { source: buf } }));
+  try {
+    await ctx.replyWithMediaGroup(photos);
+  } catch (e) {
+    // Asura pages are .webp — if Telegram rejects the album as photos,
+    // send them one by one as documents (still shows inline in the chat).
+    console.warn('[bot] media group failed, sending pages as documents:', e.message);
+    for (const { url, buf } of buffers) {
+      try {
+        const name = url.split('/').pop()?.split('?')[0] || 'page.webp';
+        await ctx.replyWithDocument({ source: buf, filename: name });
+      } catch (e2) { console.warn('[bot] document page failed:', url, e2.message); }
+    }
+  }
+  r.pos += buffers.length;
   const left = r.pages.length - r.pos;
   const rows = [];
   if (left > 0) rows.push([Markup.button.callback(`Next ${Math.min(PAGE_BATCH, left)} pages (${from + photos.length}–${Math.min(r.pages.length, to + PAGE_BATCH)} of ${r.pages.length}) ➡️`, 'n:')]);
@@ -190,7 +212,7 @@ bot.start((ctx) => ctx.reply(
   `• /search <title> — e.g. /search solo leveling\n` +
   `• Or just type a title — plain text also searches\n` +
   `• Tap a result → tap a chapter → pages arrive as photos, 10 at a time\n\n` +
-  `Note: AsuraScans is Cloudflare-blocked on the server right now, so most searches will show MangaDex results until that's fixed (PROXY_URL / FlareSolverr on the backend). MangaDex reading works — tested with Berserk Ch. 0.01, 94 pages.`
+  `Note: AsuraScans works now (fixed 2026-11-15) — searches try Asura first, MangaDex as fallback. MangaDex reading works — tested with Berserk Ch. 0.01, 94 pages.`
 ));
 bot.help((ctx) => ctx.reply(
   `Commands:\n/search <title> — search AsuraScans, fallback MangaDex\n/start — about this bot\n\nJust typing a title also searches. Tap a result, then a chapter, then Next to keep reading.`

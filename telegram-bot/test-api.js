@@ -49,5 +49,5 @@ const api = require('./api');
     console.log('   failed as expected:', e.message.slice(0, 120));
   }
 
-  console.log('\n✅ API layer OK — bot search + read works with MangaDex today; Asura will work automatically once its Cloudflare block is fixed.');
+  console.log('\n✅ API layer OK — bot search + read works with MangaDex today; Asura works via the fixed backend (api.asurascans.com + new site scrape).');
 })().catch((e) => { console.error('\n❌ test failed:', e.message); process.exit(1); });
