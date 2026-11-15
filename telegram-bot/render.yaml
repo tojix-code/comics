@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: comicverse-telegram-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node bot.js
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: COMICVERSE_API_URL
+        value: https://comicverse-api.vercel.app
