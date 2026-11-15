@@ -15,7 +15,7 @@ function PageImage({ page, alt, index, onVisible, eager, filter }) {
     const el = ref.current;
     if (!el || !onVisible) return;
     const obs = new IntersectionObserver((entries) => {
-      entries.forEach((en) => { if (en.isIntersecting) onVisible(index); });
+      entries.forEach((en) => { onVisible(index, en.isIntersecting); });
     }, { rootMargin: '200px' });
     obs.observe(el);
     return () => obs.disconnect();
@@ -71,15 +71,23 @@ export default function ReaderPage() {
     else setSettings((s) => ({ ...s, direction: s.direction === 'rtl' ? 'rtl' : 'ltr' }));
   }
   // Hide the top bar while scrolling down to read, bring it back on scroll up.
+  // Delta is accumulated across scroll events: a single event's jump can be
+  // tiny (smooth scrolling fires many small events), so judging one event
+  // alone left the bar stuck hidden until the very top of the page.
   const [barHidden, setBarHidden] = useState(false);
   const lastScrollY = useRef(0);
+  const scrollAccum = useRef(0);
   useEffect(() => {
     function onScroll() {
       const y = window.scrollY || 0;
-      const last = lastScrollY.current;
+      const delta = y - lastScrollY.current;
       lastScrollY.current = y;
-      if (y > last + 8 && y > 120) setBarHidden((h) => (h ? h : true));
-      else if (y < last - 8 || y <= 120) setBarHidden((h) => (h ? false : h));
+      if (delta === 0) return;
+      // A change of direction resets the accumulated run.
+      if (Math.sign(delta) !== Math.sign(scrollAccum.current)) scrollAccum.current = 0;
+      scrollAccum.current += delta;
+      if (scrollAccum.current > 60 && y > 120) { setBarHidden(true); scrollAccum.current = 0; }
+      else if (scrollAccum.current < -60 || y <= 120) { setBarHidden(false); scrollAccum.current = 0; }
     }
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
@@ -106,6 +114,7 @@ export default function ReaderPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setError(null); setPages([]); setPageIndex(0); setMaxSeen(0);
+    setCurrentPage(0); visiblePages.current.clear();
     const ch = chapters.find((c) => c.id === chapterId);
     const target = ch || { id: chapterId, source };
     getChapterPages(source, seriesId, target)
@@ -136,9 +145,21 @@ export default function ReaderPage() {
 
   useEffect(() => { persist(maxSeen); }, [maxSeen, persist]);
 
-  // Strip mode: track furthest visible page via IntersectionObserver callbacks.
-  const handleVisible = useCallback((idx) => {
-    setMaxSeen((m) => Math.max(m, idx));
+  // Strip mode: track the topmost page currently on screen. That is the
+  // reading position shown in the progress bar — the furthest page ever seen
+  // (maxSeen) is kept separately for saving resume progress, because using
+  // it for the bar stuck the bar at 100% after scrolling down and back up.
+  const visiblePages = useRef(new Set());
+  const [currentPage, setCurrentPage] = useState(0);
+  const handleVisible = useCallback((idx, isVisible) => {
+    if (isVisible) {
+      visiblePages.current.add(idx);
+      setMaxSeen((m) => Math.max(m, idx));
+    } else {
+      visiblePages.current.delete(idx);
+    }
+    const visible = [...visiblePages.current];
+    if (visible.length) setCurrentPage(Math.min(...visible));
   }, []);
 
   // Keyboard: strip mode scrolls by the configured step (Arrow / Space / W / S),
@@ -211,10 +232,10 @@ export default function ReaderPage() {
   function goToChapter(ch) {
     if (ch) navigate(`/read/${source}/${encodeURIComponent(seriesId)}/${encodeURIComponent(ch.id)}`);
   }
-  // Paged mode tracks the current page; strip mode tracks the furthest page
-  // seen. Using maxSeen in paged mode would stick the bar at 100% after
-  // switching over from strip (where every page was already observed).
-  const pct = pages.length ? progressPercent(mode === 'paged' ? pageIndex : Math.max(pageIndex, maxSeen), pages.length) : 0;
+  // Paged mode tracks the current page; strip mode tracks the topmost page
+  // currently on screen. Using furthest-seen for the bar stuck it at 100%
+  // after switching over from strip (where every page was already observed).
+  const pct = pages.length ? progressPercent(mode === 'paged' ? pageIndex : Math.max(pageIndex, currentPage), pages.length) : 0;
   const filter = pageFilter(settings);
   const eager = settings.preload === 'all';
   const progressClass =

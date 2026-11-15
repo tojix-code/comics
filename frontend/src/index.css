@@ -282,3 +282,4 @@ table.admin-table { width: 100%; border-collapse: collapse; font-size: 14px; min
 .rs-slider span { min-width: 64px; text-align: right; font-size: 13px; }
 .rs-check { display: flex; gap: 10px; align-items: center; justify-content: center; margin-top: 10px; padding: 12px; border-radius: 8px; border: 1px solid #33465a; background: #22303e; cursor: pointer; font-size: 14px; }
 .rs-check input { accent-color: #2fb8cf; width: 16px; height: 16px; }
+.rs-reset-all { width: 100%; margin-top: 18px; padding: 11px; border-radius: 8px; border: 1px solid #33465a; background: #263646; color: #cfe0ee; cursor: pointer; font-size: 14px; }

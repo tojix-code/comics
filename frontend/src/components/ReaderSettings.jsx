@@ -196,6 +196,10 @@ export default function ReaderSettingsPanel({ settings, onChange, onClose }) {
             <span>{settings.dim}%</span>
           </label>
         </Section>
+
+        <button type="button" className="rs-reset-all" onClick={() => onChange({ ...DEFAULT_SETTINGS })}>
+          Reset to defaults
+        </button>
       </div>
     </div>
   );
