@@ -47,13 +47,23 @@ function seriesCaption(s, extra = '') {
 }
 
 async function sendCover(ctx, s, caption, buttons) {
+  // 1. Download the cover ourselves and upload it (most reliable for pages).
   try {
     if (s.cover) {
       const buf = await api.fetchBuffer(s.cover);
       await ctx.replyWithPhoto({ source: buf }, { caption, parse_mode: 'HTML', ...buttons });
       return;
     }
-  } catch (e) { console.warn('[bot] cover failed, sending text:', e.message); }
+  } catch (e) { console.warn('[bot] cover download failed, trying Telegram direct URL:', e.message); }
+  // 2. Let Telegram's own servers fetch the URL — sometimes they succeed
+  // where our download gets a MangaDex bot-check page (uploads host 403/302).
+  try {
+    if (s.cover) {
+      await ctx.replyWithPhoto(s.cover, { caption, parse_mode: 'HTML', ...buttons });
+      return;
+    }
+  } catch (e) { console.warn('[bot] cover direct URL failed, sending text instead:', e.message); }
+  // 3. Text only — the series info still works, just without a cover photo.
   await ctx.reply(caption, { parse_mode: 'HTML', ...buttons });
 }
 
