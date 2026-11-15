@@ -5,9 +5,10 @@ import { nextChapter, prevChapter, progressPercent } from '../lib/filters';
 import { getProgress, recordHistory, saveProgress, addReport } from '../lib/store';
 import { useCurrentUser } from '../lib/useAuth';
 import { ErrorState } from '../components/ui';
+import ReaderSettingsPanel, { DEFAULT_SETTINGS, loadSettings, pageFilter, saveSettings } from '../components/ReaderSettings';
 
 /** One reader page image: direct URL first, backend proxy on error, then an error card. */
-function PageImage({ page, alt, index, onVisible }) {
+function PageImage({ page, alt, index, onVisible, eager, filter }) {
   const [step, setStep] = useState(0); // 0 direct, 1 proxy, 2 failed
   const ref = useRef(null);
   useEffect(() => {
@@ -33,7 +34,8 @@ function PageImage({ page, alt, index, onVisible }) {
       ref={ref}
       src={src}
       alt={alt}
-      loading="lazy"
+      loading={eager ? 'eager' : 'lazy'}
+      style={filter && filter !== 'none' ? { filter } : undefined}
       onError={() => setStep((s) => (s < 2 ? s + 1 : s))}
     />
   );
@@ -53,6 +55,21 @@ export default function ReaderPage() {
   const [maxSeen, setMaxSeen] = useState(0);
   const [retryTick, setRetryTick] = useState(0);
   const [reportSent, setReportSent] = useState(false);
+  // Reader settings (direction, margins, auto-scroll, progress bar, …).
+  const [settings, setSettings] = useState(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [autoScrolling, setAutoScrolling] = useState(false);
+  useEffect(() => { saveSettings(settings); }, [settings]);
+  // Reading direction drives the mode: top-to-bottom = strip, left/right = paged.
+  const direction = settings.direction;
+  useEffect(() => {
+    setMode(direction === 'top-bottom' ? 'strip' : 'paged');
+  }, [direction]);
+  function setDirectionMode(m) {
+    setMode(m);
+    if (m === 'strip') setSettings((s) => ({ ...s, direction: 'top-bottom' }));
+    else setSettings((s) => ({ ...s, direction: s.direction === 'rtl' ? 'rtl' : 'ltr' }));
+  }
   // Hide the top bar while scrolling down to read, bring it back on scroll up.
   const [barHidden, setBarHidden] = useState(false);
   const lastScrollY = useRef(0);
@@ -124,16 +141,68 @@ export default function ReaderPage() {
     setMaxSeen((m) => Math.max(m, idx));
   }, []);
 
-  // Keyboard navigation in paged mode.
+  // Keyboard: strip mode scrolls by the configured step (Arrow / Space / W / S),
+  // paged mode flips pages (arrows reversed for right-to-left).
   useEffect(() => {
-    if (mode !== 'paged') return;
     function onKey(e) {
-      if (e.key === 'ArrowRight') setPageIndex((i) => Math.min(pages.length - 1, i + 1));
-      if (e.key === 'ArrowLeft') setPageIndex((i) => Math.max(0, i - 1));
+      if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+      const stepPx = Math.round(window.innerHeight * (settings.keyboardStep / 100));
+      const behavior = settings.keyboardScroll === 'smooth' ? 'smooth' : 'auto';
+      if (mode === 'strip') {
+        if (['ArrowDown', ' ', 's', 'S'].includes(e.key)) { e.preventDefault(); window.scrollBy({ top: stepPx, behavior }); }
+        else if (['ArrowUp', 'w', 'W'].includes(e.key)) { e.preventDefault(); window.scrollBy({ top: -stepPx, behavior }); }
+        return;
+      }
+      const forward = direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
+      const back = direction === 'rtl' ? 'ArrowRight' : 'ArrowLeft';
+      if (e.key === forward || e.key === ' ' || e.key === 'ArrowDown') setPageIndex((i) => Math.min(pages.length - 1, i + 1));
+      else if (e.key === back || e.key === 'ArrowUp') setPageIndex((i) => Math.max(0, i - 1));
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [mode, pages.length]);
+  }, [mode, pages.length, settings.keyboardStep, settings.keyboardScroll, direction]);
+
+  // Auto-scroll (play / pause button in the reader bar).
+  useEffect(() => {
+    if (!autoScrolling || !pages.length) return;
+    if (mode === 'paged') {
+      // Advance one page per interval; interval from speed so faster = sooner.
+      const interval = Math.min(10000, Math.max(1200, Math.round((window.innerHeight / settings.autoScrollSpeed) * 1000)));
+      const id = window.setInterval(() => {
+        setPageIndex((i) => {
+          if (i >= pages.length - 1) { setAutoScrolling(false); return i; }
+          return i + 1;
+        });
+      }, interval);
+      return () => window.clearInterval(id);
+    }
+    if (settings.autoScrollMode === 'step') {
+      const stepPx = Math.round(window.innerHeight * (settings.keyboardStep / 100));
+      const interval = Math.min(10000, Math.max(1200, Math.round((stepPx / settings.autoScrollSpeed) * 1000)));
+      const id = window.setInterval(() => {
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        if (window.scrollY >= max - 2) { setAutoScrolling(false); return; }
+        window.scrollBy({ top: stepPx, behavior: 'auto' });
+      }, interval);
+      return () => window.clearInterval(id);
+    }
+    // Continuous: smooth scroll at autoScrollSpeed px/s.
+    let raf = 0;
+    let last = performance.now();
+    function tick(now) {
+      const dt = (now - last) / 1000;
+      last = now;
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      if (window.scrollY >= max - 2) { setAutoScrolling(false); return; }
+      window.scrollBy(0, settings.autoScrollSpeed * dt);
+      raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [autoScrolling, mode, pages.length, settings.autoScrollMode, settings.autoScrollSpeed, settings.keyboardStep]);
+
+  // Stop auto-scroll when the chapter changes.
+  useEffect(() => { setAutoScrolling(false); }, [chapterId]);
 
   useEffect(() => { setMaxSeen((m) => Math.max(m, pageIndex)); }, [pageIndex]);
 
@@ -143,6 +212,17 @@ export default function ReaderPage() {
     if (ch) navigate(`/read/${source}/${encodeURIComponent(seriesId)}/${encodeURIComponent(ch.id)}`);
   }
   const pct = pages.length ? progressPercent(Math.max(pageIndex, maxSeen), pages.length) : 0;
+  const filter = pageFilter(settings);
+  const eager = settings.preload === 'all';
+  const progressClass =
+    settings.progressBar === 'hidden' ? 'reader-progress reader-progress-hidden' :
+    settings.progressBar === 'bottom' ? 'reader-progress reader-progress-bottom' :
+    settings.progressBar === 'left' ? 'reader-progress reader-progress-left' :
+    settings.progressBar === 'right' ? 'reader-progress reader-progress-right' :
+    'reader-progress reader-progress-top';
+  // In right-to-left paged mode the page buttons flip direction.
+  const pageForwardLabel = direction === 'rtl' ? '← Next page' : 'Next page →';
+  const pageBackLabel = direction === 'rtl' ? 'Prev page →' : '← Prev page';
 
   return (
     <main className="reader">
@@ -157,12 +237,21 @@ export default function ReaderPage() {
           </select>
         )}
         <div role="group" aria-label="Reading mode">
-          <button type="button" className={`btn btn-sm ${mode === 'strip' ? 'btn-primary' : ''}`} onClick={() => setMode('strip')}>Strip</button>
+          <button type="button" className={`btn btn-sm ${mode === 'strip' ? 'btn-primary' : ''}`} onClick={() => setDirectionMode('strip')}>Strip</button>
           {' '}
-          <button type="button" className={`btn btn-sm ${mode === 'paged' ? 'btn-primary' : ''}`} onClick={() => setMode('paged')}>Paged</button>
+          <button type="button" className={`btn btn-sm ${mode === 'paged' ? 'btn-primary' : ''}`} onClick={() => setDirectionMode('paged')}>Paged</button>
         </div>
+        <button
+          type="button" className={`btn btn-sm ${autoScrolling ? 'btn-primary' : ''}`}
+          aria-label={autoScrolling ? 'Pause auto-scroll' : 'Play auto-scroll'}
+          title={autoScrolling ? 'Pause auto-scroll' : 'Auto-scroll'}
+          onClick={() => setAutoScrolling((v) => !v)}
+        >
+          {autoScrolling ? '⏸' : '▶'}
+        </button>
+        <button type="button" className="btn btn-sm" aria-label="Reader settings" title="Settings" onClick={() => setSettingsOpen(true)}>⚙️</button>
       </div>
-      <div className="reader-progress" aria-label={`Reading progress ${pct}%`}><div style={{ width: `${pct}%` }} /></div>
+      <div className={progressClass} aria-label={`Reading progress ${pct}%`}><div style={{ width: `${pct}%`, height: `${pct}%` }} /></div>
 
       {loading && (
         <div className="reader-pages">
@@ -189,9 +278,9 @@ export default function ReaderPage() {
       )}
 
       {!loading && !error && pages.length > 0 && mode === 'strip' && (
-        <div className="reader-pages strip" ref={stripRef}>
+        <div className="reader-pages strip" ref={stripRef} style={{ '--strip-gap': `${settings.stripMargin}px` }}>
           {pages.map((p, i) => (
-            <PageImage key={`${p.url}-${i}`} page={p} alt={`Page ${i + 1}`} index={i} onVisible={handleVisible} />
+            <PageImage key={`${p.url}-${i}`} page={p} alt={`Page ${i + 1}`} index={i} onVisible={handleVisible} eager={eager} filter={filter} />
           ))}
           <p className="reader-hint">Scroll to read · progress saves automatically{user ? '' : ' (sign in to keep it across devices on this browser)'}</p>
         </div>
@@ -200,12 +289,12 @@ export default function ReaderPage() {
       {!loading && !error && pages.length > 0 && mode === 'paged' && (
         <div className="reader-pages paged">
           <div className="page-frame">
-            <PageImage key={pages[pageIndex].url} page={pages[pageIndex]} alt={`Page ${pageIndex + 1} of ${pages.length}`} index={pageIndex} onVisible={null} />
+            <PageImage key={pages[pageIndex].url} page={pages[pageIndex]} alt={`Page ${pageIndex + 1} of ${pages.length}`} index={pageIndex} onVisible={null} eager={eager} filter={filter} />
           </div>
           <p className="reader-hint">Page {pageIndex + 1} of {pages.length} · use ← → keys or the buttons below</p>
           <div className="reader-nav" style={{ padding: '0 0 20px' }}>
-            <button type="button" className="btn" disabled={pageIndex <= 0} onClick={() => setPageIndex((i) => Math.max(0, i - 1))}>← Prev page</button>
-            <button type="button" className="btn" disabled={pageIndex >= pages.length - 1} onClick={() => setPageIndex((i) => Math.min(pages.length - 1, i + 1))}>Next page →</button>
+            <button type="button" className="btn" disabled={pageIndex <= 0} onClick={() => setPageIndex((i) => Math.max(0, i - 1))}>{pageBackLabel}</button>
+            <button type="button" className="btn" disabled={pageIndex >= pages.length - 1} onClick={() => setPageIndex((i) => Math.min(pages.length - 1, i + 1))}>{pageForwardLabel}</button>
           </div>
         </div>
       )}
@@ -216,6 +305,13 @@ export default function ReaderPage() {
           <Link to={`/series/${source}/${encodeURIComponent(seriesId)}`} className="btn">All chapters</Link>
           <button type="button" className="btn btn-primary" disabled={!next} onClick={() => goToChapter(next)}>{next ? `Next chapter (Ch. ${next.number}) →` : 'Last chapter'}</button>
         </div>
+      )}
+      {settingsOpen && (
+        <ReaderSettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
     </main>
   );
