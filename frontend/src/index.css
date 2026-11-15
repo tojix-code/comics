@@ -194,7 +194,11 @@ input, select, textarea { font: inherit; color: var(--text); }
   position: sticky; top: 0; z-index: 40;
   background: rgba(5, 7, 10, 0.94); border-bottom: 1px solid var(--border);
   padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  transition: transform 0.25s ease;
 }
+/* Hidden while scrolling down to read — slides up out of view, slides back
+   in as soon as you scroll up. */
+.reader-bar-hidden { transform: translateY(-110%); }
 .reader-bar h1 { font-size: 15px; margin: 0; flex: 1; min-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reader-bar select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); max-width: 220px; }
 .reader-progress { height: 4px; background: #1a2330; }

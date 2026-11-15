@@ -53,6 +53,20 @@ export default function ReaderPage() {
   const [maxSeen, setMaxSeen] = useState(0);
   const [retryTick, setRetryTick] = useState(0);
   const [reportSent, setReportSent] = useState(false);
+  // Hide the top bar while scrolling down to read, bring it back on scroll up.
+  const [barHidden, setBarHidden] = useState(false);
+  const lastScrollY = useRef(0);
+  useEffect(() => {
+    function onScroll() {
+      const y = window.scrollY || 0;
+      const last = lastScrollY.current;
+      lastScrollY.current = y;
+      if (y > last + 8 && y > 120) setBarHidden((h) => (h ? h : true));
+      else if (y < last - 8 || y <= 120) setBarHidden((h) => (h ? false : h));
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
   const stripRef = useRef(null);
 
   const chapter = chapters.find((c) => c.id === chapterId) || null;
@@ -132,7 +146,7 @@ export default function ReaderPage() {
 
   return (
     <main className="reader">
-      <div className="reader-bar">
+      <div className={`reader-bar${barHidden ? ' reader-bar-hidden' : ''}`}>
         <Link to={`/series/${source}/${encodeURIComponent(seriesId)}`} className="btn btn-sm">← Series</Link>
         <h1>{series ? series.title : 'Loading…'} {chapterNumber ? `— Ch. ${chapterNumber}` : ''}</h1>
         {chapters.length > 0 && (
