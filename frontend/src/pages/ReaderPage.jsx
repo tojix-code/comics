@@ -70,7 +70,21 @@ export default function ReaderPage() {
     if (m === 'strip') setSettings((s) => ({ ...s, direction: 'top-bottom' }));
     else setSettings((s) => ({ ...s, direction: s.direction === 'rtl' ? 'rtl' : 'ltr' }));
   }
-  // Hide the top bar while scrolling down to read, bring it back on scroll up.
+  // The site navbar is sticky at the top (z-index above the reader bar), so
+  // the reader bar must stick *below* it, not under it. Measure the navbar
+  // height (it wraps on narrow screens) and stick the bar that far down.
+  // In the Telegram Mini App there is no navbar, so the height is 0 and the
+  // bar sticks to the very top, as before.
+  const [navHeight, setNavHeight] = useState(0);
+  useEffect(() => {
+    const nav = document.querySelector('.navbar');
+    if (!nav) return undefined;
+    const measure = () => setNavHeight(nav.offsetHeight || 0);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(nav);
+    return () => ro.disconnect();
+  }, []);
   // Delta is accumulated across scroll events: a single event's jump can be
   // tiny (smooth scrolling fires many small events), so judging one event
   // alone left the bar stuck hidden until the very top of the page.
@@ -250,7 +264,7 @@ export default function ReaderPage() {
 
   return (
     <main className="reader">
-      <div className={`reader-bar${barHidden ? ' reader-bar-hidden' : ''}`}>
+      <div className={`reader-bar${barHidden ? ' reader-bar-hidden' : ''}`} style={{ '--reader-bar-top': `${navHeight}px` }}>
         <Link to={`/series/${source}/${encodeURIComponent(seriesId)}`} className="btn btn-sm">← Series</Link>
         <h1>{series ? series.title : 'Loading…'} {chapterNumber ? `— Ch. ${chapterNumber}` : ''}</h1>
         {chapters.length > 0 && (
