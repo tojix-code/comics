@@ -124,7 +124,7 @@ function chapterButtons(s, page = 0) {
   if (nav.length) rows.push(nav);
   // Quick read-latest button on first page
   if (page === 0 && s.chapters.length) rows.unshift([Markup.button.callback(`📖 Read latest (Ch. ${s.chapters[s.chapters.length - 1].number})`, `r:${s.chapters.length - 1}`)]);
-  rows.push([Markup.button.callback('⬇️ Download chapters (PDF / ZIP)', 'dl:')]);
+  rows.push([Markup.button.callback('⬇️ Download chapters (PDF)', 'dl:')]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -240,10 +240,7 @@ async function startReading(ctx, chapterIdx) {
 }
 
 // ─── Downloads ───────────────────────────────────────────────────────────────
-// One chapter → one PDF; a range / all chapters → ZIPs of PDFs, each ZIP
-// capped at ~40 MB because Telegram bots cannot send files over 50 MB.
-// Files are built on the fly and sent straight to Telegram — nothing is
-// stored on the server.
+// One chapter → one PDF, sent part by part: build, send, forget, next.
 
 async function downloadOneChapter(ctx, chapterIdx) {
   const s = session(ctx);
@@ -273,41 +270,29 @@ async function downloadOneChapter(ctx, chapterIdx) {
 async function downloadChapters(ctx, chapters) {
   const s = session(ctx);
   if (!chapters.length) { await ctx.reply('No chapters in that range.'); return; }
-  const status = await ctx.reply(`⬇️ Downloading <b>${esc(s.series.title)}</b> — ${chapters.length} chapter(s)…\nThis takes a while; I'll send each file as it's ready.`, { parse_mode: 'HTML' });
-  const pdfs = [];
+  const status = await ctx.reply(`⬇️ Downloading <b>${esc(s.series.title)}</b> — ${chapters.length} chapter(s), one PDF at a time…`, { parse_mode: 'HTML' });
+  let sent = 0;
+  let failed = 0;
   try {
     for (let i = 0; i < chapters.length; i++) {
       const ch = chapters[i];
       await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
-        `⬇️ Downloading <b>${esc(s.series.title)}</b> — ${i + 1}/${chapters.length} (Ch. ${esc(ch.number)})…`, { parse_mode: 'HTML' }).catch(() => {});
+        `⬇️ Downloading <b>${esc(s.series.title)}</b> — ${i + 1}/${chapters.length} (Ch. ${esc(ch.number)})…\n${sent} sent${failed ? `, ${failed} skipped` : ''}`, { parse_mode: 'HTML' }).catch(() => {});
       try {
         const pdf = await dl.chapterPdf(s.series, ch);
-        pdfs.push({ ...pdf, number: ch.number });
+        await ctx.replyWithDocument({ source: pdf.buffer, filename: pdf.name },
+          { caption: `<b>${esc(s.series.title)}</b> — Chapter ${esc(ch.number)} (${pdf.pages}/${pdf.total} pages)`, parse_mode: 'HTML' });
+        sent++;
       } catch (e) {
+        failed++;
         console.warn('[bot] chapter download failed:', ch.number, e.message);
         await ctx.reply(`⚠️ Skipped Ch. ${esc(ch.number)}: ${esc(e.message)}`, { parse_mode: 'HTML' });
       }
     }
-    if (!pdfs.length) {
-      await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, 'Nothing could be downloaded — every chapter failed.', { parse_mode: 'HTML' }).catch(() => {});
-      return;
-    }
-    const parts = dl.chunkIntoZips(s.series, pdfs);
     await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
-      `📦 Sending ${parts.length} file(s) for <b>${esc(s.series.title)}</b>…`, { parse_mode: 'HTML' }).catch(() => {});
-    for (const part of parts) {
-      if (part.kind === 'pdf') {
-        await ctx.replyWithDocument({ source: part.pdf.buffer, filename: part.pdf.name },
-          { caption: `<b>${esc(s.series.title)}</b> — Chapter ${esc(part.pdf.number)} (too big to zip)`, parse_mode: 'HTML' });
-      } else {
-        const buf = await dl.buildZip(part.files);
-        await ctx.replyWithDocument({ source: buf, filename: part.name },
-          { caption: `<b>${esc(s.series.title)}</b> — ${part.files.length} chapter(s), ${(buf.length / 1024 / 1024).toFixed(1)} MB`, parse_mode: 'HTML' });
-      }
-    }
-    await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+      `✅ Done — <b>${esc(s.series.title)}</b>: ${sent} chapter(s) sent${failed ? `, ${failed} skipped` : ''}.`, { parse_mode: 'HTML' }).catch(() => {});
   } catch (e) {
-    await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, `Download failed: ${esc(e.message)}`, { parse_mode: 'HTML' }).catch(() => {});
+    await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, `Download stopped: ${esc(e.message)}`, { parse_mode: 'HTML' }).catch(() => {});
   }
 }
 
@@ -324,13 +309,13 @@ async function showDownloadMenu(ctx) {
   if (!s.series || !s.chapters) { await ctx.answerCbQuery('Open a series first.'); return; }
   await ctx.answerCbQuery();
   await ctx.reply(
-    `⬇️ <b>Download ${esc(s.series.title)}</b>\n${s.chapters.length} chapters loaded.\n\n• Single chapter → one PDF\n• Range → one ZIP of PDFs per ~40 MB\n• All chapters → several ZIPs (Telegram caps files at 50 MB)`,
+    `⬇️ <b>Download ${esc(s.series.title)}</b>\n${s.chapters.length} chapters loaded.\n\nEach chapter is sent as its own PDF, one after another — no big ZIP to wait for, and if one chapter fails the rest still arrive.`,
     {
       parse_mode: 'HTML',
       ...Markup.inlineKeyboard([
         [Markup.button.callback('📄 Single chapter (PDF)', 'dl1:')],
-        [Markup.button.callback('📦 A range of chapters (ZIP)', 'dlr:')],
-        [Markup.button.callback('📦 All chapters (ZIP)', 'dla:')],
+        [Markup.button.callback('📄 A range of chapters (PDF each)', 'dlr:')],
+        [Markup.button.callback('📄 All chapters (PDF each)', 'dla:')],
         [Markup.button.callback('📚 Back to chapters', 'backch')],
       ]),
     }
@@ -361,7 +346,7 @@ bot.start((ctx) => ctx.reply(
   `• /search <title> — e.g. /search solo leveling\n` +
   `• Or just type a title — plain text also searches\n` +
   `• Tap a result → tap a chapter → 📖 Open Reader opens the Mini App, with Prev / Next chapter buttons at the bottom\n` +
-  `• Tap ⬇️ Download chapters on a series to save chapters as PDF (one chapter) or ZIPs of PDFs (a range, or all)\n\n` +
+  `• Tap ⬇️ Download chapters on a series to save chapters as PDFs, one per chapter, sent one after another\n\n` +
   `Note: AsuraScans works now (fixed 2026-11-15) — searches try Asura first, MangaDex as fallback. MangaDex reading works — tested with Berserk Ch. 0.01, 94 pages.`
 ));
 bot.help((ctx) => ctx.reply(
@@ -435,7 +420,7 @@ bot.action('dlr:', async (ctx) => {
   await ctx.answerCbQuery();
   if (!s.series || !s.chapters) { await ctx.reply('Open a series first.'); return; }
   s.awaitingRange = true;
-  await ctx.reply(`📦 Which chapters? Reply with a range like <b>1-10</b> (chapter numbers, with a dash).\nI'll send them as ZIPs of PDFs, ~40 MB each.`, { parse_mode: 'HTML' });
+  await ctx.reply(`📦 Which chapters? Reply with a range like <b>1-10</b> (chapter numbers, with a dash).\nEach chapter arrives as its own PDF, one after another.`, { parse_mode: 'HTML' });
 });
 bot.action('dla:', async (ctx) => {
   const s = session(ctx);

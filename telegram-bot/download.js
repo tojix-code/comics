@@ -1,12 +1,15 @@
-// ─── Chapter download: PDF per chapter, ZIP of PDFs ────────────────────────
+// ─── Chapter download: one PDF per chapter, sent part by part ───────────────
 // The bot fetches pages live from the providers (nothing is stored anywhere)
-// and builds the files on the fly, then sends them to Telegram and forgets
-// them. Two hard limits shape this module:
+// and builds each chapter's PDF on the fly, sends it to Telegram, forgets
+// it, and moves on to the next chapter. Sending part by part (instead of
+// one big ZIP) keeps memory low — the bot never holds more than one chapter
+// at a time — and if one chapter fails, the rest still arrive.
+//
+// Two hard limits shape this module:
 //
 // 1. Telegram bots can only SEND files up to 50 MB. A chapter PDF is usually
-//    3–10 MB, so one chapter is fine, but a ZIP of many chapters is not —
-//    chapters are packed into ZIPs of at most ~40 MB, and a long series
-//    arrives as several ZIPs.
+//    3–10 MB; a very long chapter is rebuilt smaller if it comes out over
+//    45 MB, and skipped with a message if it still won't fit.
 // 2. PDFs cannot hold .webp images (Asura pages are .webp), so every page is
 //    converted to JPEG with sharp first. MangaDex pages are already JPEG.
 //
@@ -16,11 +19,10 @@
 // failed). Direct download is the fallback.
 
 const PDFDocument = require('pdfkit');
-const archiver = require('archiver');
 const sharp = require('sharp');
 const api = require('./api');
 
-const MAX_FILE_BYTES = 40 * 1024 * 1024; // stay safely under Telegram's 50 MB cap
+const MAX_FILE_BYTES = 45 * 1024 * 1024; // stay safely under Telegram's 50 MB cap
 const JPEG_QUALITY = 80;
 const MAX_WIDTH = 1600;
 
@@ -30,13 +32,7 @@ function safeName(s) {
 
 function chapterPdfName(series, chapter) {
   return `${safeName(series.title)} - Ch. ${chapter.number}.pdf`;
-}
-
-function zipName(series, from, to) {
-  return `${safeName(series.title)} - Ch. ${from}-${to}.zip`;
-}
-
-// Download one page image: proxy first (reliable), direct as fallback.
+}// Download one page image: proxy first (reliable), direct as fallback.
 // One retry each way — a page occasionally comes back truncated.
 async function fetchPageImage(url) {
   const proxied = `${api.API_BASE}/api/proxy/image?url=${encodeURIComponent(url)}`;
@@ -80,7 +76,7 @@ async function downloadAll(urls, onProgress) {
 }
 
 // Build a PDF Buffer from page image buffers (webp/jpg/png → JPEG pages).
-async function buildPdf(imageBuffers) {
+async function buildPdf(imageBuffers, quality = JPEG_QUALITY, maxWidth = MAX_WIDTH) {
   const doc = new PDFDocument({ autoFirstPage: false });
   const chunks = [];
   const finished = new Promise((resolve, reject) => {
@@ -90,9 +86,9 @@ async function buildPdf(imageBuffers) {
   });
   for (const buf of imageBuffers) {
     if (!buf) continue;
-    const jpg = await sharp(buf).jpeg({ quality: JPEG_QUALITY }).toBuffer();
+    const jpg = await sharp(buf).jpeg({ quality }).toBuffer();
     const meta = await sharp(jpg).metadata();
-    const width = Math.min(meta.width || 800, MAX_WIDTH);
+    const width = Math.min(meta.width || 800, maxWidth);
     const height = Math.round((meta.height || 1200) * (width / (meta.width || 800)));
     doc.addPage({ size: [width, height], margins: 0 });
     doc.image(jpg, 0, 0, { width, height });
@@ -103,63 +99,21 @@ async function buildPdf(imageBuffers) {
 }
 
 // One chapter → one PDF Buffer. Returns { buffer, pages, name }.
+// A very long chapter (100+ pages) can push the PDF near Telegram's 50 MB
+// send limit — if that happens, rebuild it smaller instead of failing.
 async function chapterPdf(series, chapter, onProgress) {
   const { pages } = await api.getPages(series.source, series.id, chapter);
   if (!pages.length) throw new Error(`Chapter ${chapter.number} has no readable pages.`);
   const images = await downloadAll(pages, onProgress);
   const usable = images.filter(Boolean);
   if (!usable.length) throw new Error(`Chapter ${chapter.number}: every page failed to download.`);
-  const buffer = await buildPdf(usable);
+  let buffer = await buildPdf(usable);
+  if (buffer.length > MAX_FILE_BYTES) {
+    console.warn(`[download] Ch. ${chapter.number} PDF is ${(buffer.length / 1024 / 1024).toFixed(1)} MB — rebuilding smaller`);
+    buffer = await buildPdf(usable, 60, 1200);
+  }
+  if (buffer.length > MAX_FILE_BYTES) throw new Error(`Chapter ${chapter.number} is too big to send even compressed (${(buffer.length / 1024 / 1024).toFixed(1)} MB).`);
   return { buffer, pages: usable.length, total: pages.length, name: chapterPdfName(series, chapter) };
 }
 
-// A ZIP Buffer holding the given [{ name, buffer }] files.
-// (archiver v8 exports classes, not a callable factory.)
-function buildZip(files) {
-  return new Promise((resolve, reject) => {
-    const archive = new archiver.ZipArchive({ zlib: { level: 6 } });
-    const chunks = [];
-    archive.on('data', (c) => chunks.push(c));
-    archive.on('end', () => resolve(Buffer.concat(chunks)));
-    archive.on('error', reject);
-    for (const f of files) archive.append(f.buffer, { name: f.name });
-    archive.finalize();
-  });
-}
-
-// Split chapter PDFs into ZIPs of at most MAX_FILE_BYTES each. A single
-// chapter bigger than the cap goes out alone as its own PDF, not in a ZIP.
-function chunkIntoZips(series, pdfs) {
-  const zips = [];
-  let current = [];
-  let currentBytes = 0;
-  let rangeStart = null;
-  let rangeEnd = null;
-  const flush = () => {
-    if (!current.length) return;
-    zips.push({ files: current, from: rangeStart, to: rangeEnd });
-    current = [];
-    currentBytes = 0;
-    rangeStart = null;
-    rangeEnd = null;
-  };
-  for (const pdf of pdfs) {
-    if (pdf.buffer.length > MAX_FILE_BYTES) {
-      flush();
-      zips.push({ single: pdf });
-      continue;
-    }
-    if (current.length && currentBytes + pdf.buffer.length > MAX_FILE_BYTES) flush();
-    if (!current.length) rangeStart = pdf.number;
-    rangeEnd = pdf.number;
-    current.push(pdf);
-    currentBytes += pdf.buffer.length;
-  }
-  flush();
-  return zips.map((z) => {
-    if (z.single) return { kind: 'pdf', pdf: z.single };
-    return { kind: 'zip', name: zipName(series, z.from, z.to), files: z.files };
-  });
-}
-
-module.exports = { chapterPdf, buildZip, chunkIntoZips, safeName, MAX_FILE_BYTES };
+module.exports = { chapterPdf, safeName, MAX_FILE_BYTES };
