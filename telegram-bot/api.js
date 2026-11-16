@@ -212,10 +212,10 @@ async function getSeries(source, id) {
   }
 }
 
-async function getChapters(source, seriesId, title = '') {
+async function getChapters(source, seriesId, title = '', limit = 96) {
   // Backend first
   try {
-    const params = new URLSearchParams({ source, lang: 'en', page: '1', limit: '96' });
+    const params = new URLSearchParams({ source, lang: 'en', page: '1', limit: String(limit) });
     if (title) params.set('title', title);
     const data = await fetchJson(`${API_BASE}/api/manga/${enc(seriesId)}/chapters?${params}`);
     let chapters = (data?.chapters ?? []).map((c) => normChapter(c, c.source || source)).filter((c) => c.id && c.number !== '');

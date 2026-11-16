@@ -7,6 +7,7 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const api = require('./api');
+const dl = require('./download');
 
 const TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -123,6 +124,20 @@ function chapterButtons(s, page = 0) {
   if (nav.length) rows.push(nav);
   // Quick read-latest button on first page
   if (page === 0 && s.chapters.length) rows.unshift([Markup.button.callback(`📖 Read latest (Ch. ${s.chapters[s.chapters.length - 1].number})`, `r:${s.chapters.length - 1}`)]);
+  rows.push([Markup.button.callback('⬇️ Download chapters (PDF / ZIP)', 'dl:')]);
+  return Markup.inlineKeyboard(rows);
+}
+
+// Same chapter list, but tapping a chapter downloads it as a PDF.
+function downloadChapterButtons(s, page = 0) {
+  const start = page * CHAPTERS_PER_PAGE;
+  const slice = s.chapters.slice(start, start + CHAPTERS_PER_PAGE);
+  const rows = slice.map((c, i) => [Markup.button.callback(`⬇️ Ch. ${c.number}${c.title ? ` — ${c.title.slice(0, 25)}` : ''}`, `d:${start + i}`)]);
+  const nav = [];
+  if (page > 0) nav.push(Markup.button.callback('⬅️ Prev', `dp:${page - 1}`));
+  if (start + CHAPTERS_PER_PAGE < s.chapters.length) nav.push(Markup.button.callback('Next ➡️', `dp:${page + 1}`));
+  if (nav.length) rows.push(nav);
+  rows.push([Markup.button.callback('📚 Back to chapters', 'backch')]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -217,7 +232,106 @@ async function startReading(ctx, chapterIdx) {
       ...Markup.inlineKeyboard([
         [Markup.button.webApp('📖 Open Reader', url)],
         [Markup.button.callback('📥 Send pages in chat instead', `r2:${chapterIdx}`)],
+        [Markup.button.callback('⬇️ Download this chapter (PDF)', `d:${chapterIdx}`)],
         [Markup.button.callback('📚 Chapters', 'backch')],
+      ]),
+    }
+  );
+}
+
+// ─── Downloads ───────────────────────────────────────────────────────────────
+// One chapter → one PDF; a range / all chapters → ZIPs of PDFs, each ZIP
+// capped at ~40 MB because Telegram bots cannot send files over 50 MB.
+// Files are built on the fly and sent straight to Telegram — nothing is
+// stored on the server.
+
+async function downloadOneChapter(ctx, chapterIdx) {
+  const s = session(ctx);
+  const chapter = s.chapters?.[chapterIdx];
+  if (!chapter || !s.series) { await ctx.answerCbQuery('Chapter expired — open the series again.'); return; }
+  await ctx.answerCbQuery(`Downloading Ch. ${chapter.number}…`);
+  const status = await ctx.reply(`⬇️ Downloading <b>${esc(s.series.title)}</b> — Ch. ${esc(chapter.number)}…`, { parse_mode: 'HTML' });
+  try {
+    let lastEdit = 0;
+    const { buffer, pages, total, name } = await dl.chapterPdf(s.series, chapter, (done, all) => {
+      const now = Date.now();
+      if (now - lastEdit < 4000 && done < all) return;
+      lastEdit = now;
+      ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
+        `⬇️ Downloading <b>${esc(s.series.title)}</b> — Ch. ${esc(chapter.number)}…\n${done}/${all} pages`, { parse_mode: 'HTML' }).catch(() => {});
+    });
+    await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
+      `📄 Sending <b>${esc(name)}</b> (${pages}/${total} pages, ${(buffer.length / 1024 / 1024).toFixed(1)} MB)…`, { parse_mode: 'HTML' }).catch(() => {});
+    await ctx.replyWithDocument({ source: buffer, filename: name }, { caption: `<b>${esc(s.series.title)}</b> — Chapter ${esc(chapter.number)}`, parse_mode: 'HTML' });
+    await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+  } catch (e) {
+    await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
+      `Download failed for Ch. ${esc(chapter.number)}: ${esc(e.message)}`, { parse_mode: 'HTML' }).catch(() => {});
+  }
+}
+
+async function downloadChapters(ctx, chapters) {
+  const s = session(ctx);
+  if (!chapters.length) { await ctx.reply('No chapters in that range.'); return; }
+  const status = await ctx.reply(`⬇️ Downloading <b>${esc(s.series.title)}</b> — ${chapters.length} chapter(s)…\nThis takes a while; I'll send each file as it's ready.`, { parse_mode: 'HTML' });
+  const pdfs = [];
+  try {
+    for (let i = 0; i < chapters.length; i++) {
+      const ch = chapters[i];
+      await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
+        `⬇️ Downloading <b>${esc(s.series.title)}</b> — ${i + 1}/${chapters.length} (Ch. ${esc(ch.number)})…`, { parse_mode: 'HTML' }).catch(() => {});
+      try {
+        const pdf = await dl.chapterPdf(s.series, ch);
+        pdfs.push({ ...pdf, number: ch.number });
+      } catch (e) {
+        console.warn('[bot] chapter download failed:', ch.number, e.message);
+        await ctx.reply(`⚠️ Skipped Ch. ${esc(ch.number)}: ${esc(e.message)}`, { parse_mode: 'HTML' });
+      }
+    }
+    if (!pdfs.length) {
+      await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, 'Nothing could be downloaded — every chapter failed.', { parse_mode: 'HTML' }).catch(() => {});
+      return;
+    }
+    const parts = dl.chunkIntoZips(s.series, pdfs);
+    await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
+      `📦 Sending ${parts.length} file(s) for <b>${esc(s.series.title)}</b>…`, { parse_mode: 'HTML' }).catch(() => {});
+    for (const part of parts) {
+      if (part.kind === 'pdf') {
+        await ctx.replyWithDocument({ source: part.pdf.buffer, filename: part.pdf.name },
+          { caption: `<b>${esc(s.series.title)}</b> — Chapter ${esc(part.pdf.number)} (too big to zip)`, parse_mode: 'HTML' });
+      } else {
+        const buf = await dl.buildZip(part.files);
+        await ctx.replyWithDocument({ source: buf, filename: part.name },
+          { caption: `<b>${esc(s.series.title)}</b> — ${part.files.length} chapter(s), ${(buf.length / 1024 / 1024).toFixed(1)} MB`, parse_mode: 'HTML' });
+      }
+    }
+    await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+  } catch (e) {
+    await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined, `Download failed: ${esc(e.message)}`, { parse_mode: 'HTML' }).catch(() => {});
+  }
+}
+
+// Load the full chapter list (the series view only loads the first 96).
+async function fullChapterList(ctx) {
+  const s = session(ctx);
+  const { chapters } = await api.getChapters(s.series.source, s.series.id, s.series.title, 500);
+  if (chapters.length) { s.chapters = chapters; }
+  return s.chapters;
+}
+
+async function showDownloadMenu(ctx) {
+  const s = session(ctx);
+  if (!s.series || !s.chapters) { await ctx.answerCbQuery('Open a series first.'); return; }
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `⬇️ <b>Download ${esc(s.series.title)}</b>\n${s.chapters.length} chapters loaded.\n\n• Single chapter → one PDF\n• Range → one ZIP of PDFs per ~40 MB\n• All chapters → several ZIPs (Telegram caps files at 50 MB)`,
+    {
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('📄 Single chapter (PDF)', 'dl1:')],
+        [Markup.button.callback('📦 A range of chapters (ZIP)', 'dlr:')],
+        [Markup.button.callback('📦 All chapters (ZIP)', 'dla:')],
+        [Markup.button.callback('📚 Back to chapters', 'backch')],
       ]),
     }
   );
@@ -246,17 +360,44 @@ bot.start((ctx) => ctx.reply(
   `Search AsuraScans first, MangaDex as fallback, and read chapters in the Mini App reader right inside Telegram.\n\n` +
   `• /search <title> — e.g. /search solo leveling\n` +
   `• Or just type a title — plain text also searches\n` +
-  `• Tap a result → tap a chapter → 📖 Open Reader opens the Mini App, with Prev / Next chapter buttons at the bottom\n\n` +
+  `• Tap a result → tap a chapter → 📖 Open Reader opens the Mini App, with Prev / Next chapter buttons at the bottom\n` +
+  `• Tap ⬇️ Download chapters on a series to save chapters as PDF (one chapter) or ZIPs of PDFs (a range, or all)\n\n` +
   `Note: AsuraScans works now (fixed 2026-11-15) — searches try Asura first, MangaDex as fallback. MangaDex reading works — tested with Berserk Ch. 0.01, 94 pages.`
 ));
 bot.help((ctx) => ctx.reply(
-  `Commands:\n/search <title> — search AsuraScans, fallback MangaDex\n/start — about this bot\n\nJust typing a title also searches. Tap a result, then a chapter, then 📖 Open Reader — the Mini App has Prev / Next chapter buttons.`
+  `Commands:\n/search <title> — search AsuraScans, fallback MangaDex\n/start — about this bot\n\nJust typing a title also searches. Tap a result, then a chapter, then 📖 Open Reader — the Mini App has Prev / Next chapter buttons. Use ⬇️ Download chapters on a series page to save PDFs.`
 ));
 bot.command('search', (ctx) => doSearch(ctx, ctx.message.text.replace(/^\/search\s*/i, '')));
 
-// Plain text = search (ignore other commands)
-bot.on('text', (ctx) => {
+// Plain text = search, unless the bot is waiting for a download range.
+bot.on('text', async (ctx) => {
   if (ctx.message.text.startsWith('/')) return;
+  const s = session(ctx);
+  if (s.awaitingRange) {
+    s.awaitingRange = false;
+    const m = ctx.message.text.trim().match(/^(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)$/);
+    if (!m) { await ctx.reply('That doesn\'t look like a range. Send it like 1-10 (chapter numbers, with a dash).'); return; }
+    const from = parseFloat(m[1]);
+    const to = parseFloat(m[2]);
+    if (!(to >= from)) { await ctx.reply('The second number should be bigger than the first. Send a range like 1-10.'); return; }
+    try {
+      const chapters = await fullChapterList(ctx);
+      const picked = chapters.filter((c) => {
+        const n = parseFloat(c.number);
+        return Number.isFinite(n) && n >= from && n <= to;
+      });
+      if (!picked.length) { await ctx.reply(`No chapters between ${from} and ${to} in this series.`); return; }
+      if (picked.length > 50) {
+        await ctx.reply(`That's ${picked.length} chapters — too many for one go. I'll do the first 50 (Ch. ${picked[0].number}–${picked[49].number}); send another range for the rest.`);
+        await downloadChapters(ctx, picked.slice(0, 50));
+        return;
+      }
+      await downloadChapters(ctx, picked);
+    } catch (e) {
+      await ctx.reply(`Could not load the chapter list: ${esc(e.message)}`, { parse_mode: 'HTML' });
+    }
+    return;
+  }
   return doSearch(ctx, ctx.message.text);
 });
 
@@ -273,6 +414,46 @@ bot.action(/^cp:(\d+)$/, async (ctx) => {
 });
 bot.action(/^r:(\d+)$/, (ctx) => startReading(ctx, Number(ctx.match[1])));
 bot.action(/^r2:(\d+)$/, (ctx) => startReadingInChat(ctx, Number(ctx.match[1])));
+bot.action('dl:', (ctx) => showDownloadMenu(ctx));
+bot.action('dl1:', async (ctx) => {
+  const s = session(ctx);
+  await ctx.answerCbQuery();
+  if (!s.series || !s.chapters) { await ctx.reply('Open a series first.'); return; }
+  s.chapterPage = 0;
+  await ctx.reply(`⬇️ Pick a chapter to download as a PDF — <b>${esc(s.series.title)}</b>:`, { parse_mode: 'HTML', ...downloadChapterButtons(s, 0) });
+});
+bot.action(/^dp:(\d+)$/, async (ctx) => {
+  const s = session(ctx);
+  if (!s.series || !s.chapters) { await ctx.answerCbQuery('Open a series first.'); return; }
+  await ctx.answerCbQuery();
+  s.chapterPage = Number(ctx.match[1]);
+  await ctx.reply(`⬇️ Pick a chapter to download as a PDF — <b>${esc(s.series.title)}</b>:`, { parse_mode: 'HTML', ...downloadChapterButtons(s, s.chapterPage) });
+});
+bot.action(/^d:(\d+)$/, (ctx) => downloadOneChapter(ctx, Number(ctx.match[1])));
+bot.action('dlr:', async (ctx) => {
+  const s = session(ctx);
+  await ctx.answerCbQuery();
+  if (!s.series || !s.chapters) { await ctx.reply('Open a series first.'); return; }
+  s.awaitingRange = true;
+  await ctx.reply(`📦 Which chapters? Reply with a range like <b>1-10</b> (chapter numbers, with a dash).\nI'll send them as ZIPs of PDFs, ~40 MB each.`, { parse_mode: 'HTML' });
+});
+bot.action('dla:', async (ctx) => {
+  const s = session(ctx);
+  await ctx.answerCbQuery('Loading the full chapter list…');
+  if (!s.series) { await ctx.reply('Open a series first.'); return; }
+  try {
+    const chapters = await fullChapterList(ctx);
+    if (!chapters.length) { await ctx.reply('No chapters found for this series.'); return; }
+    if (chapters.length > 100) {
+      await ctx.reply(`That's ${chapters.length} chapters — I'll do the first 100 (Ch. ${chapters[0].number}–${chapters[99].number}). Send a range like 101-200 for the rest.`);
+      await downloadChapters(ctx, chapters.slice(0, 100));
+      return;
+    }
+    await downloadChapters(ctx, chapters);
+  } catch (e) {
+    await ctx.reply(`Could not load the chapter list: ${esc(e.message)}`, { parse_mode: 'HTML' });
+  }
+});
 bot.action('n:', async (ctx) => { await ctx.answerCbQuery(); await sendPageBatch(ctx); });
 bot.action('backch', async (ctx) => {
   const s = session(ctx);

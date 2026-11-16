@@ -85,3 +85,13 @@ chapter buttons at the bottom.
 
 `📥 Send pages in chat instead` still tries the old photo flow (10 pages at
 a time as a media group, `.webp` pages fall back to documents).
+
+## Downloads (PDF / ZIP)
+
+- On a series page tap **⬇️ Download chapters (PDF / ZIP)**, or **⬇️ Download this chapter (PDF)** on a chapter card.
+- **Single chapter** → one PDF, built from the chapter's pages.
+- **A range** → reply with a range like `1-10`; the bot sends ZIPs of PDFs.
+- **All chapters** → same, split into several ZIPs. Capped at 100 chapters per tap (send a range for the rest).
+- Pages are fetched live through the ComicVerse image proxy, converted from `.webp` to JPEG with `sharp`, laid out with `pdfkit`, and zipped with `archiver`. Nothing is stored on the server — files are built in memory and sent straight to Telegram.
+- Telegram bots can only send files up to 50 MB, so each ZIP is capped at ~40 MB. A chapter PDF is usually 3–10 MB. One page can be missing if the source CDN itself serves a broken image (e.g. Solo Leveling Ch. 2 p. 18 is a 388-byte placeholder on Asura's CDN) — the PDF is still built with the rest, and the caption says how many pages it has.
+- After pulling, run `npm install` (sharp downloads a native binary) and restart the bot.
