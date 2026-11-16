@@ -33,23 +33,17 @@ function safeName(s) {
 function chapterPdfName(series, chapter) {
   return `${safeName(series.title)} - Ch. ${chapter.number}.pdf`;
 }// Download one page image: proxy first (reliable), direct as fallback.
-// One retry each way — a page occasionally comes back truncated.
+// No retry loop — a genuinely broken page (e.g. a 388-byte placeholder on
+// the CDN) never succeeds, and retrying it used to burn ~100s per page
+// before the chapter could move on. One quick try each way, then skip it.
 async function fetchPageImage(url) {
   const proxied = `${api.API_BASE}/api/proxy/image?url=${encodeURIComponent(url)}`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      return await api.fetchBuffer(proxied);
-    } catch (e) {
-      console.warn('[download] proxy fetch failed, trying direct:', e.message);
-      try {
-        return await api.fetchBuffer(url);
-      } catch (e2) {
-        console.warn('[download] direct fetch failed:', e2.message);
-        if (attempt === 1) throw e2;
-      }
-    }
+  try {
+    return await api.fetchBuffer(proxied, 15000);
+  } catch (e) {
+    console.warn('[download] proxy fetch failed, trying direct:', e.message);
+    return await api.fetchBuffer(url, 15000);
   }
-  throw new Error('Could not download image');
 }
 
 // Download pages a few at a time (faster than one-by-one, kinder than all at once).
@@ -75,6 +69,30 @@ async function downloadAll(urls, onProgress) {
   return out;
 }
 
+// Prepare one page for the PDF: { data (JPEG buffer), width, height }.
+// Speed matters here — on Render free (0.1 CPU) image conversion is the
+// slowest part of a download, and the old code ran sharp TWICE per page
+// (once to convert, once to measure). Now it runs at most once:
+// - JPEG pages (MangaDex) are already JPEG: measure only, embed as-is.
+// - WebP pages (Asura) are converted once, and the size comes back with
+//   the conversion (resolveWithObject) instead of a second sharp call.
+async function preparePage(buf, quality = JPEG_QUALITY, maxWidth = MAX_WIDTH) {
+  const isJpeg = buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF;
+  if (isJpeg) {
+    const meta = await sharp(buf).metadata();
+    // Small enough already: embed as-is, no conversion at all.
+    if ((meta.width || 800) <= maxWidth) {
+      return { data: buf, width: meta.width || 800, height: meta.height || 1200 };
+    }
+    // Oversized JPEG (wide MangaDex pages): shrink it — this is also what
+    // makes the oversized-chapter fallback work for JPEG chapters.
+    const { data, info } = await sharp(buf).resize({ width: maxWidth }).jpeg({ quality }).toBuffer({ resolveWithObject: true });
+    return { data, width: info.width, height: info.height };
+  }
+  const { data, info } = await sharp(buf).jpeg({ quality }).toBuffer({ resolveWithObject: true });
+  return { data, width: info.width, height: info.height };
+}
+
 // Build a PDF Buffer from page image buffers (webp/jpg/png → JPEG pages).
 async function buildPdf(imageBuffers, quality = JPEG_QUALITY, maxWidth = MAX_WIDTH) {
   const doc = new PDFDocument({ autoFirstPage: false });
@@ -86,12 +104,11 @@ async function buildPdf(imageBuffers, quality = JPEG_QUALITY, maxWidth = MAX_WID
   });
   for (const buf of imageBuffers) {
     if (!buf) continue;
-    const jpg = await sharp(buf).jpeg({ quality }).toBuffer();
-    const meta = await sharp(jpg).metadata();
-    const width = Math.min(meta.width || 800, maxWidth);
-    const height = Math.round((meta.height || 1200) * (width / (meta.width || 800)));
+    const page = await preparePage(buf, quality, maxWidth);
+    const width = Math.min(page.width, maxWidth);
+    const height = Math.round(page.height * (width / page.width));
     doc.addPage({ size: [width, height], margins: 0 });
-    doc.image(jpg, 0, 0, { width, height });
+    doc.image(page.data, 0, 0, { width, height });
   }
   doc.end();
   await finished;

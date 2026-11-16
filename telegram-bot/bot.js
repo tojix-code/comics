@@ -276,10 +276,20 @@ async function downloadChapters(ctx, chapters) {
   try {
     for (let i = 0; i < chapters.length; i++) {
       const ch = chapters[i];
+      // Show live page progress inside the chapter — the old message only
+      // changed once per chapter, so a slow chapter looked frozen.
+      let lastEdit = 0;
+      const onPage = (done, all) => {
+        const now = Date.now();
+        if (now - lastEdit < 5000 && done < all) return;
+        lastEdit = now;
+        ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
+          `⬇️ Downloading <b>${esc(s.series.title)}</b> — ${i + 1}/${chapters.length} (Ch. ${esc(ch.number)} — page ${done}/${all})…\n${sent} sent${failed ? `, ${failed} skipped` : ''}`, { parse_mode: 'HTML' }).catch(() => {});
+      };
       await ctx.telegram.editMessageText(ctx.chat.id, status.message_id, undefined,
         `⬇️ Downloading <b>${esc(s.series.title)}</b> — ${i + 1}/${chapters.length} (Ch. ${esc(ch.number)})…\n${sent} sent${failed ? `, ${failed} skipped` : ''}`, { parse_mode: 'HTML' }).catch(() => {});
       try {
-        const pdf = await dl.chapterPdf(s.series, ch);
+        const pdf = await dl.chapterPdf(s.series, ch, onPage);
         await ctx.replyWithDocument({ source: pdf.buffer, filename: pdf.name },
           { caption: `<b>${esc(s.series.title)}</b> — Chapter ${esc(ch.number)} (${pdf.pages}/${pdf.total} pages)`, parse_mode: 'HTML' });
         sent++;
